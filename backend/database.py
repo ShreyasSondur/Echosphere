@@ -89,6 +89,28 @@ def init_db():
             )
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tier_settings (
+                tier_name TEXT PRIMARY KEY,
+                price REAL NOT NULL,
+                original_price REAL NOT NULL,
+                claimed_count INTEGER NOT NULL,
+                total_count INTEGER NOT NULL,
+                badge_text TEXT NOT NULL DEFAULT 'Early Bird Ticket',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        # Ensure default Early Bird Ticket row exists
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO tier_settings (tier_name, price, original_price, claimed_count, total_count, badge_text, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("Early Bird Ticket", 349.00, 499.00, 182, 200, "Early Bird Ticket", now_iso),
+        )
         conn.commit()
         conn.close()
 
@@ -500,3 +522,83 @@ def validate_admin_session(token: str) -> bool:
         row = cursor.fetchone()
         conn.close()
         return bool(row)
+
+# -------------------------------------------------------------
+# Ticket Tier Pricing & Scarcity Management
+# -------------------------------------------------------------
+def get_tier_settings(tier_name: str = "Early Bird Ticket") -> Dict[str, Any]:
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM tier_settings WHERE tier_name = ? LIMIT 1",
+            (tier_name,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            # Fallback default
+            conn.close()
+            return {
+                "tier_name": tier_name,
+                "price": 349.00,
+                "original_price": 499.00,
+                "claimed_count": 182,
+                "total_count": 200,
+                "spots_left": 18,
+                "badge_text": "Early Bird Ticket",
+                "savings": 150.00,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        
+        price = float(row["price"])
+        orig_price = float(row["original_price"])
+        claimed = int(row["claimed_count"])
+        total = int(row["total_count"])
+        badge = str(row["badge_text"] if "badge_text" in row.keys() else "Early Bird Ticket")
+        updated_at = str(row["updated_at"])
+        conn.close()
+        
+        spots_left = max(0, total - claimed)
+        savings = max(0.0, orig_price - price)
+        return {
+            "tier_name": tier_name,
+            "price": price,
+            "original_price": orig_price,
+            "claimed_count": claimed,
+            "total_count": total,
+            "spots_left": spots_left,
+            "badge_text": badge,
+            "savings": savings,
+            "updated_at": updated_at,
+        }
+
+def update_tier_settings(
+    tier_name: str,
+    price: float,
+    original_price: float,
+    claimed_count: int,
+    total_count: int,
+    badge_text: str = "Early Bird Ticket",
+) -> Dict[str, Any]:
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cursor.execute(
+            """
+            INSERT INTO tier_settings (tier_name, price, original_price, claimed_count, total_count, badge_text, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tier_name) DO UPDATE SET
+                price = excluded.price,
+                original_price = excluded.original_price,
+                claimed_count = excluded.claimed_count,
+                total_count = excluded.total_count,
+                badge_text = excluded.badge_text,
+                updated_at = excluded.updated_at
+            """,
+            (tier_name.strip(), float(price), float(original_price), int(claimed_count), int(total_count), badge_text.strip(), now_iso),
+        )
+        conn.commit()
+        conn.close()
+    return get_tier_settings(tier_name)
+

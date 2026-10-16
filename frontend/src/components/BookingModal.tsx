@@ -50,11 +50,27 @@ declare global {
   }
 }
 
-const TICKET_PRICE = 349;
-const ORIGINAL_PRICE = 499;
-const CLAIMED_COUNT = 182;
-const TOTAL_EARLY_BIRD = 200;
-const SPOTS_LEFT = TOTAL_EARLY_BIRD - CLAIMED_COUNT; // 18 remaining
+export interface TierSettings {
+  tier_name: string;
+  price: number;
+  original_price: number;
+  claimed_count: number;
+  total_count: number;
+  spots_left: number;
+  badge_text?: string;
+  savings?: number;
+}
+
+const DEFAULT_TIER_SETTINGS: TierSettings = {
+  tier_name: "Early Bird Ticket",
+  price: 349,
+  original_price: 499,
+  claimed_count: 182,
+  total_count: 200,
+  spots_left: 18,
+  badge_text: "Early Bird Ticket",
+  savings: 150,
+};
 
 export default function BookingModal({
   isOpen,
@@ -69,6 +85,7 @@ export default function BookingModal({
     { fullName: "", email: "", phone: "" },
   ]);
 
+  const [tierSettings, setTierSettings] = useState<TierSettings>(DEFAULT_TIER_SETTINGS);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -76,6 +93,28 @@ export default function BookingModal({
   // Confirmed tickets state
   const [confirmedTickets, setConfirmedTickets] = useState<ConfirmedTicket[]>([]);
   const [activeTicketView, setActiveTicketView] = useState<number>(0);
+
+  // Fetch live pricing & scarcity from backend whenever modal opens
+  useEffect(() => {
+    if (!isOpen) return;
+    const fetchTierSettings = async () => {
+      try {
+        const effectiveApiUrl = apiUrl || (typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") ? "http://localhost:8002" : "");
+        const res = await fetch(`${effectiveApiUrl}/api/tickets/tier-settings?tier_name=Early+Bird+Ticket`, {
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const data: TierSettings = await res.json();
+          if (data && data.price) {
+            setTierSettings(data);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not fetch dynamic tier settings, using defaults:", err);
+      }
+    };
+    void fetchTierSettings();
+  }, [isOpen, apiUrl]);
 
   // Sync if confirmed tickets are passed in
   useEffect(() => {
@@ -92,9 +131,12 @@ export default function BookingModal({
 
   if (!isOpen) return null;
 
-  const totalAmount = ticketCount * TICKET_PRICE;
-  const totalOriginal = ticketCount * ORIGINAL_PRICE;
-  const totalSavings = totalOriginal - totalAmount;
+  const currentPrice = tierSettings.price || 349;
+  const currentOriginalPrice = tierSettings.original_price || 499;
+  const totalAmount = ticketCount * currentPrice;
+  const totalOriginal = ticketCount * currentOriginalPrice;
+  const totalSavings = Math.max(0, totalOriginal - totalAmount);
+  const perTicketSavings = Math.max(0, currentOriginalPrice - currentPrice);
 
   const handleTicketCountChange = (newCount: number) => {
     const valid = Math.min(10, Math.max(1, newCount));
@@ -458,24 +500,30 @@ export default function BookingModal({
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <span className="font-bold text-white text-sm sm:text-base">
-                      Early Bird Ticket
+                      {tierSettings.badge_text || tierSettings.tier_name || "Early Bird Ticket"}
                     </span>
-                    <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full">
-                      Save ₹150
-                    </span>
+                    {perTicketSavings > 0 && (
+                      <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full">
+                        Save ₹{perTicketSavings}
+                      </span>
+                    )}
                   </div>
                   
                   <div className="flex items-baseline gap-1.5 text-xs">
-                    <span className="text-lg font-bold text-white">₹{TICKET_PRICE}</span>
-                    <span className="line-through text-slate-500 text-xs">₹{ORIGINAL_PRICE}</span>
+                    <span className="text-lg font-bold text-white">₹{currentPrice}</span>
+                    {currentOriginalPrice > currentPrice && (
+                      <span className="line-through text-slate-500 text-xs">₹{currentOriginalPrice}</span>
+                    )}
                     <span className="text-slate-400">• Arena Entry</span>
                   </div>
 
                   {/* Minimal, elegant marketing urgency */}
                   <div className="pt-1 flex items-center gap-2 text-[11px] text-amber-300">
-                    <span>🔥 {CLAIMED_COUNT}/{TOTAL_EARLY_BIRD} booked</span>
+                    <span>🔥 {tierSettings.claimed_count}/{tierSettings.total_count} booked</span>
                     <span className="text-slate-500">•</span>
-                    <span className="text-slate-400">Only {SPOTS_LEFT} left at this price</span>
+                    <span className="text-slate-400">
+                      {tierSettings.spots_left > 0 ? `Only ${tierSettings.spots_left} left at this price` : "Sold out at this tier"}
+                    </span>
                   </div>
                 </div>
 

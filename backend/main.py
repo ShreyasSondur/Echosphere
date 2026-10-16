@@ -38,6 +38,8 @@ from database import (
     save_admin_otp,
     verify_admin_otp,
     validate_admin_session,
+    get_tier_settings,
+    update_tier_settings,
 )
 from email_service import (
     send_ticket_confirmation_email,
@@ -56,7 +58,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("echosphere_backend")
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "idontknow").strip()
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", os.getenv("SMTP_EMAIL", "webflowcommunity@srinivasuniversity.edu.in")).strip()
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "shreyas.u.sondur@gmail.com").strip()
 
 # Initialize database
 init_db()
@@ -236,6 +238,7 @@ def background_email_task(
     amount: float,
     security_hash: str,
     created_at: str,
+    phone: Optional[str] = None,
 ):
     success = send_ticket_confirmation_email(
         to_email=to_email,
@@ -245,6 +248,7 @@ def background_email_task(
         amount=amount,
         security_hash=security_hash,
         created_at=created_at,
+        phone=phone or "",
     )
     if success:
         mark_email_sent(ticket_number)
@@ -284,20 +288,30 @@ def health_check():
 def ticket_stats():
     return get_ticket_stats()
 
+@app.get("/api/tickets/tier-settings")
+def get_public_tier_settings(tier_name: str = "Early Bird Ticket"):
+    """
+    Returns live dynamic pricing, scratched price, and scarcity numbers for the frontend.
+    """
+    return get_tier_settings(tier_name)
+
 @app.get("/api/tickets/tiers")
 def list_tiers():
+    settings = get_tier_settings("Early Bird Ticket")
     return [
         {
             "id": "early-bird",
-            "name": "Early Bird Ticket",
-            "price": 349.00,
-            "original_price": 499.00,
+            "name": settings["tier_name"],
+            "price": settings["price"],
+            "original_price": settings["original_price"],
             "currency": "INR",
-            "tag": "Early Bird Ticket 182/200",
-            "marketing_badge": "182/200 Claimed",
-            "spots_left": 18,
-            "total_early_bird": 200,
-            "claimed_early_bird": 182,
+            "tag": f"{settings['tier_name']} {settings['claimed_count']}/{settings['total_count']}",
+            "marketing_badge": f"{settings['claimed_count']}/{settings['total_count']} Claimed",
+            "spots_left": settings["spots_left"],
+            "total_early_bird": settings["total_count"],
+            "claimed_early_bird": settings["claimed_count"],
+            "badge_text": settings["badge_text"],
+            "savings": settings["savings"],
             "perks": [
                 "Full amphitheatre arena access at Srinivas University Mukka",
                 "Live concert entry for Najran Kabeer × Benji Beats",
@@ -328,7 +342,13 @@ def create_order(payload: CreateCashfreeOrderRequest):
         )
 
     order_id = f"ES_{int(time.time() * 1000)}"
-    
+    tier_name = payload.tier or "Early Bird Ticket"
+    tier_info = get_tier_settings(tier_name)
+    per_ticket_price = tier_info["price"]
+    calculated_amount = round(per_ticket_price * payload.ticket_count, 2)
+    # Use server-calculated amount to prevent tampering, or payload amount if matches
+    final_amount = calculated_amount if calculated_amount > 0 else payload.amount
+
     # Normalize attendee list
     attendee_dicts = []
     if payload.attendees and len(payload.attendees) > 0:
@@ -351,16 +371,16 @@ def create_order(payload: CreateCashfreeOrderRequest):
         customer_name=payload.customer_name,
         customer_email=payload.customer_email,
         customer_phone=payload.customer_phone,
-        tier=payload.tier or "Early Bird Ticket",
+        tier=tier_name,
         ticket_count=payload.ticket_count,
-        amount=payload.amount,
+        amount=final_amount,
         attendees=attendee_dicts,
     )
 
     try:
         order_res = create_cashfree_order(
             order_id=order_id,
-            amount=payload.amount,
+            amount=final_amount,
             customer_name=payload.customer_name,
             customer_email=payload.customer_email,
             customer_phone=payload.customer_phone,
@@ -374,7 +394,7 @@ def create_order(payload: CreateCashfreeOrderRequest):
             "payment_session_id": order_res.get("payment_session_id"),
             "configured": order_res.get("configured", True),
             "mode": mode,
-            "amount": payload.amount,
+            "amount": final_amount,
             "currency": "INR",
         }
     except Exception as e:
@@ -523,7 +543,8 @@ def fulfill_booking(
             detail=f"Only {stats['available_tickets']} ticket(s) remaining for EchoSphere.",
         )
 
-    per_ticket_amount = TIER_PRICING.get(tier, 349.00)
+    tier_info = get_tier_settings(tier)
+    per_ticket_amount = tier_info["price"]
 
     # 4. Generate tickets in DB
     created_tickets = []
@@ -552,6 +573,7 @@ def fulfill_booking(
                 amount=ticket["amount"],
                 security_hash=ticket["security_hash"],
                 created_at=ticket["created_at"],
+                phone=ticket.get("phone", ""),
             )
         else:
             try:
@@ -563,6 +585,7 @@ def fulfill_booking(
                     amount=ticket["amount"],
                     security_hash=ticket["security_hash"],
                     created_at=ticket["created_at"],
+                    phone=ticket.get("phone", ""),
                 )
             except Exception as mail_err:
                 logger.error(f"Email dispatch error: {mail_err}")
@@ -719,9 +742,10 @@ class AdminManualTicketRequest(BaseModel):
     full_name: str
     email: str
     phone: str
-    tier: Optional[str] = "Spot Entry"
+    tier: Optional[str] = "Spot Entry Pass"
     amount: float
     send_email: Optional[bool] = True
+    admit_now: Optional[bool] = False
 
 def require_admin(request: Request) -> str:
     auth = request.headers.get("Authorization", "")
@@ -754,6 +778,9 @@ def admin_login(payload: AdminLoginRequest, background_tasks: BackgroundTasks):
             detail="Incorrect administrator password.",
         )
 
+    # Dynamic ADMIN_EMAIL lookup
+    active_admin_email = os.getenv("ADMIN_EMAIL", ADMIN_EMAIL).strip()
+
     # Generate 6-digit OTP and temporary session token
     otp_code = f"{secrets.randbelow(900000) + 100000}"
     temp_token = secrets.token_hex(24)
@@ -761,10 +788,10 @@ def admin_login(payload: AdminLoginRequest, background_tasks: BackgroundTasks):
     save_admin_otp(otp_code=otp_code, token=temp_token, ttl_seconds=600)
 
     # Dispatch OTP email to admin email in background
-    background_tasks.add_task(send_admin_otp_email, ADMIN_EMAIL, otp_code)
-    logger.info(f"Admin 2FA OTP generated for {ADMIN_EMAIL}")
+    background_tasks.add_task(send_admin_otp_email, active_admin_email, otp_code)
+    logger.info(f"Admin 2FA OTP generated for {active_admin_email}")
 
-    masked = ADMIN_EMAIL[:3] + "***@" + ADMIN_EMAIL.split("@")[-1] if "@" in ADMIN_EMAIL else "Admin Email"
+    masked = active_admin_email[:3] + "***@" + active_admin_email.split("@")[-1] if "@" in active_admin_email else "Admin Email"
 
     return {
         "success": True,
@@ -825,6 +852,7 @@ def admin_create_ticket(
 ):
     """
     Spot / offline ticket generation with variable amount.
+    Delivers confirmation email immediately to attendee and returns delivery status.
     """
     stats = get_ticket_stats()
     if stats["total_sold"] >= 2000:
@@ -837,26 +865,157 @@ def admin_create_ticket(
         full_name=payload.full_name,
         email=payload.email,
         phone=payload.phone,
-        tier=payload.tier or "Spot Entry",
+        tier=payload.tier or "Spot Entry Pass",
         amount=payload.amount,
         secret_key=SECRET_KEY,
         payment_method="Cash / Offline Entry",
     )
 
+    if payload.admit_now:
+        checkin_res = checkin_ticket(ticket["ticket_number"])
+        ticket["checked_in"] = 1
+        ticket["checked_in_at"] = checkin_res.get("checked_in_at")
+
+    email_sent_immediately = False
     if payload.send_email:
-        background_tasks.add_task(
-            background_email_task,
-            to_email=ticket["email"],
-            full_name=ticket["full_name"],
-            ticket_number=ticket["ticket_number"],
-            tier=ticket["tier"],
-            amount=ticket["amount"],
-            security_hash=ticket["security_hash"],
-            created_at=ticket["created_at"],
-        )
+        # Deliver immediately so the attendee standing at the desk receives the pass right away
+        try:
+            email_sent_immediately = send_ticket_confirmation_email(
+                to_email=ticket["email"],
+                recipient_name=ticket["full_name"],
+                ticket_number=ticket["ticket_number"],
+                tier=ticket["tier"],
+                amount=ticket["amount"],
+                security_hash=ticket["security_hash"],
+                created_at=ticket["created_at"],
+                phone=ticket["phone"],
+            )
+            if email_sent_immediately:
+                mark_email_sent(ticket["ticket_number"])
+                ticket["email_sent"] = True
+                logger.info(f"Spot pass #{ticket['ticket_number']} confirmed & emailed immediately to {ticket['email']}")
+            else:
+                background_tasks.add_task(
+                    background_email_task,
+                    to_email=ticket["email"],
+                    full_name=ticket["full_name"],
+                    ticket_number=ticket["ticket_number"],
+                    tier=ticket["tier"],
+                    amount=ticket["amount"],
+                    security_hash=ticket["security_hash"],
+                    created_at=ticket["created_at"],
+                    phone=ticket["phone"],
+                )
+        except Exception as ex:
+            logger.error(f"Error during direct spot ticket email delivery: {ex}")
+            background_tasks.add_task(
+                background_email_task,
+                to_email=ticket["email"],
+                full_name=ticket["full_name"],
+                ticket_number=ticket["ticket_number"],
+                tier=ticket["tier"],
+                amount=ticket["amount"],
+                security_hash=ticket["security_hash"],
+                created_at=ticket["created_at"],
+                phone=ticket["phone"],
+            )
+
+    msg = f"Pass #{ticket['ticket_number']} created for {ticket['full_name']}."
+    if email_sent_immediately:
+        msg += f" Confirmation pass emailed directly to {ticket['email']}."
+    elif payload.send_email:
+        msg += f" Email dispatched to {ticket['email']}."
 
     return {
         "success": True,
-        "message": f"Successfully created pass #{ticket['ticket_number']} for {ticket['full_name']}!",
+        "message": msg,
         "ticket": ticket,
+        "email_sent": email_sent_immediately,
     }
+
+@app.post("/api/admin/tickets/{ticket_number}/resend-email")
+def admin_resend_ticket_email(
+    ticket_number: str,
+    admin_token: str = Depends(require_admin),
+):
+    """
+    Resends concert pass confirmation email to an attendee on demand.
+    """
+    ticket = get_ticket_by_number(ticket_number)
+    if not ticket:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Ticket #{ticket_number} not found in database.",
+        )
+
+    sent = send_ticket_confirmation_email(
+        to_email=ticket["email"],
+        recipient_name=ticket["full_name"],
+        ticket_number=ticket["ticket_number"],
+        tier=ticket["tier"],
+        amount=ticket["amount"],
+        security_hash=ticket["security_hash"],
+        created_at=ticket["created_at"],
+        phone=ticket.get("phone", ""),
+    )
+    if sent:
+        mark_email_sent(ticket["ticket_number"])
+        return {
+            "success": True,
+            "message": f"Concert pass re-sent successfully to {ticket['email']}!",
+        }
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to deliver email to {ticket['email']}. Please check SMTP connectivity.",
+        )
+
+
+class AdminUpdateTierSettingsRequest(BaseModel):
+    tier_name: Optional[str] = "Early Bird Ticket"
+    price: float = Field(..., gt=0, description="Actual ticket price charged to user")
+    original_price: float = Field(..., gt=0, description="Scratched/strikethrough original price")
+    claimed_count: int = Field(..., ge=0, description="Booked / claimed count")
+    total_count: int = Field(..., ge=1, description="Total early bird capacity")
+    badge_text: Optional[str] = "Early Bird Ticket"
+
+@app.get("/api/admin/tier-settings")
+def admin_get_tier_settings(
+    tier_name: str = "Early Bird Ticket",
+    admin_token: str = Depends(require_admin),
+):
+    """
+    Get current tier pricing & scarcity for admin management panel.
+    """
+    return {
+        "success": True,
+        "settings": get_tier_settings(tier_name),
+    }
+
+@app.put("/api/admin/tier-settings")
+def admin_update_tier_settings(
+    payload: AdminUpdateTierSettingsRequest,
+    admin_token: str = Depends(require_admin),
+):
+    """
+    Updates live ticket price, scratched price, booked count, and total spots in database.
+    This immediately reflects on frontend booking modal and Cashfree order amounts.
+    """
+    tier_name = payload.tier_name or "Early Bird Ticket"
+    updated = update_tier_settings(
+        tier_name=tier_name,
+        price=payload.price,
+        original_price=payload.original_price,
+        claimed_count=payload.claimed_count,
+        total_count=payload.total_count,
+        badge_text=payload.badge_text or tier_name,
+    )
+    logger.info(
+        f"Admin updated tier settings for '{tier_name}': price=₹{payload.price}, orig=₹{payload.original_price}, booked={payload.claimed_count}/{payload.total_count}"
+    )
+    return {
+        "success": True,
+        "message": f"Pricing updated: ₹{updated['price']} (scratched: ₹{updated['original_price']}), {updated['claimed_count']}/{updated['total_count']} booked.",
+        "settings": updated,
+    }
+
