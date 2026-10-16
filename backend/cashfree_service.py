@@ -94,7 +94,12 @@ def create_cashfree_order(
         "order_meta": {
             "return_url": target_return_url,
         },
-        "order_note": "EchoSphere Concert Passes - Srinivas University Mukka",
+        "order_note": "EchoSphere 2026 Concert Pass - Najran Kabeer × Benji Beats Live",
+        "order_tags": {
+            "brand": "EchoSphere",
+            "event": "EchoSphere 2026",
+            "venue": "SUIET Mukka",
+        },
     }
 
     url = f"{base_url}/orders"
