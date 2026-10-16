@@ -284,3 +284,83 @@ See you at EchoSphere!
     except Exception as e:
         logger.error(f"Failed to send confirmation email to {to_email}: {str(e)}", exc_info=True)
         return False
+
+def send_admin_otp_email(to_email: str, otp_code: str) -> bool:
+    """
+    Dispatches a 6-digit 2FA login OTP to the verified administrator email.
+    """
+    try:
+        subject = f"🔐 {otp_code} is your EchoSphere Admin 2FA Passkey"
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"EchoSphere Security <{SMTP_EMAIL}>"
+        msg["To"] = to_email
+
+        text_body = f"""
+Hello Administrator,
+
+Your EchoSphere 2026 Admin Gate verification code is:
+
+{otp_code}
+
+This code will expire in 10 minutes. If you did not request this code, please check your server security immediately.
+
+EchoSphere 2026 • Security Command Center
+        """
+
+        html_body = f"""
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:24px;background-color:#060714;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#f1f5f9;">
+  <div style="max-width:480px;margin:20px auto;background:#0d1127;border:1px solid #4338ca;border-radius:18px;padding:32px;box-shadow:0 20px 40px rgba(0,0,0,0.8);">
+    <div style="text-align:center;margin-bottom:20px;">
+      <span style="display:inline-block;padding:4px 12px;border-radius:9999px;background:rgba(99,102,241,0.2);color:#a5b4fc;font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">
+        Admin Authentication 2FA
+      </span>
+      <h2 style="color:#ffffff;margin:12px 0 4px 0;font-size:22px;">EchoSphere Gate Command</h2>
+      <p style="color:#94a3b8;font-size:12px;margin:0;">Najran Kabeer × Benji Beats Live Concert</p>
+    </div>
+
+    <div style="background:#060814;border:1px dashed #6366f1;border-radius:12px;padding:24px;text-align:center;margin:24px 0;">
+      <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px;">
+        Your Single-Use Verification Code
+      </div>
+      <div style="font-size:42px;font-family:'Courier New',monospace;font-weight:900;letter-spacing:8px;color:#60a5fa;">
+        {otp_code}
+      </div>
+      <div style="font-size:11px;color:#cbd5e1;margin-top:8px;">Valid for 10 minutes</div>
+    </div>
+
+    <p style="font-size:12px;color:#64748b;text-align:center;line-height:1.5;margin:0;">
+      If you did not initiate this login request on the EchoSphere command gate, please ignore this email.
+    </p>
+  </div>
+</body>
+</html>
+        """
+
+        part1 = MIMEText(text_body, "plain")
+        part2 = MIMEText(html_body, "html")
+        msg.attach(part1)
+        msg.attach(part2)
+
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                server.sendmail(SMTP_EMAIL, [to_email], msg.as_string())
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                server.sendmail(SMTP_EMAIL, [to_email], msg.as_string())
+
+        logger.info(f"EchoSphere 2FA OTP code successfully sent to {to_email}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to send 2FA OTP email to {to_email}: {e}", exc_info=True)
+        return False
+

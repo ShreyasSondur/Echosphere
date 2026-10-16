@@ -4,9 +4,10 @@ import os
 import re
 import time
 import logging
+import secrets
 from typing import Optional, Dict
 from collections import defaultdict
-from fastapi import FastAPI, HTTPException, Request, Response, BackgroundTasks, status
+from fastapi import FastAPI, HTTPException, Request, Response, BackgroundTasks, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pathlib import Path
@@ -30,8 +31,18 @@ from database import (
     save_pending_order,
     get_pending_order,
     mark_order_completed,
+    get_all_tickets,
+    checkin_ticket,
+    undo_checkin_ticket,
+    create_manual_ticket,
+    save_admin_otp,
+    verify_admin_otp,
+    validate_admin_session,
 )
-from email_service import send_ticket_confirmation_email
+from email_service import (
+    send_ticket_confirmation_email,
+    send_admin_otp_email,
+)
 from cashfree_service import (
     create_cashfree_order,
     verify_cashfree_order,
@@ -43,6 +54,9 @@ from cashfree_service import (
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("echosphere_backend")
+
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "idontknow").strip()
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", os.getenv("SMTP_EMAIL", "webflowcommunity@srinivasuniversity.edu.in")).strip()
 
 # Initialize database
 init_db()
@@ -683,5 +697,166 @@ def verify_ticket(ticket_number: str):
         "tier": ticket["tier"],
         "payment_status": ticket["payment_status"],
         "email_sent": bool(ticket["email_sent"]),
+        "checked_in": bool(ticket.get("checked_in")),
+        "checked_in_at": ticket.get("checked_in_at"),
         "created_at": ticket["created_at"],
+    }
+
+# -------------------------------------------------------------
+# Admin /lol Command Center Endpoints (2FA Protected)
+# -------------------------------------------------------------
+class AdminLoginRequest(BaseModel):
+    password: str
+
+class AdminVerifyOtpRequest(BaseModel):
+    otp: str
+
+class AdminCheckinRequest(BaseModel):
+    ticket_number: str
+    undo: Optional[bool] = False
+
+class AdminManualTicketRequest(BaseModel):
+    full_name: str
+    email: str
+    phone: str
+    tier: Optional[str] = "Spot Entry"
+    amount: float
+    send_email: Optional[bool] = True
+
+def require_admin(request: Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    token = ""
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+    elif "admin_token" in request.cookies:
+        token = request.cookies.get("admin_token", "").strip()
+
+    if not token or not validate_admin_session(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized. Please authenticate with master password and 2FA.",
+        )
+    return token
+
+@app.post("/api/admin/login")
+def admin_login(payload: AdminLoginRequest, background_tasks: BackgroundTasks):
+    """
+    Step 1 of 2FA Admin Authentication:
+    Validates the admin password (default: 'idontknow') and dispatches 6-digit OTP to admin email.
+    """
+    clean_pass = payload.password.strip().lower()
+    expected_pass = ADMIN_PASSWORD.lower()
+
+    if clean_pass != expected_pass:
+        logger.warning("Failed admin password attempt.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect administrator password.",
+        )
+
+    # Generate 6-digit OTP and temporary session token
+    otp_code = f"{secrets.randbelow(900000) + 100000}"
+    temp_token = secrets.token_hex(24)
+
+    save_admin_otp(otp_code=otp_code, token=temp_token, ttl_seconds=600)
+
+    # Dispatch OTP email to admin email in background
+    background_tasks.add_task(send_admin_otp_email, ADMIN_EMAIL, otp_code)
+    logger.info(f"Admin 2FA OTP generated for {ADMIN_EMAIL}")
+
+    masked = ADMIN_EMAIL[:3] + "***@" + ADMIN_EMAIL.split("@")[-1] if "@" in ADMIN_EMAIL else "Admin Email"
+
+    return {
+        "success": True,
+        "message": f"6-digit 2FA code sent to {masked}",
+        "masked_email": masked,
+    }
+
+@app.post("/api/admin/verify-otp")
+def admin_verify_otp(payload: AdminVerifyOtpRequest):
+    """
+    Step 2 of 2FA Admin Authentication:
+    Validates the 6-digit OTP and issues a 24-hour admin session token.
+    """
+    session_token = verify_admin_otp(payload.otp.strip())
+    if not session_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired 2FA code. Please request a new code.",
+        )
+
+    return {
+        "success": True,
+        "token": session_token,
+        "message": "Welcome to EchoSphere Gate Command Center.",
+    }
+
+@app.get("/api/admin/tickets")
+def admin_get_tickets(admin_token: str = Depends(require_admin)):
+    """
+    Fetches real-time concert ticketing roster and gate statistics.
+    """
+    stats = get_ticket_stats()
+    tickets = get_all_tickets()
+    return {
+        "success": True,
+        "stats": stats,
+        "total": len(tickets),
+        "tickets": tickets,
+    }
+
+@app.post("/api/admin/checkin")
+def admin_checkin(payload: AdminCheckinRequest, admin_token: str = Depends(require_admin)):
+    """
+    Atomic gate check-in with duplicate entry and volunteer collision prevention.
+    """
+    if payload.undo:
+        res = undo_checkin_ticket(payload.ticket_number)
+        return {"success": True, "undo": True, "ticket": res.get("ticket")}
+    
+    res = checkin_ticket(payload.ticket_number)
+    return res
+
+@app.post("/api/admin/tickets/create")
+def admin_create_ticket(
+    payload: AdminManualTicketRequest,
+    background_tasks: BackgroundTasks,
+    admin_token: str = Depends(require_admin),
+):
+    """
+    Spot / offline ticket generation with variable amount.
+    """
+    stats = get_ticket_stats()
+    if stats["total_sold"] >= 2000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Maximum concert capacity of 2000 tickets reached.",
+        )
+
+    ticket = create_manual_ticket(
+        full_name=payload.full_name,
+        email=payload.email,
+        phone=payload.phone,
+        tier=payload.tier or "Spot Entry",
+        amount=payload.amount,
+        secret_key=SECRET_KEY,
+        payment_method="Cash / Offline Entry",
+    )
+
+    if payload.send_email:
+        background_tasks.add_task(
+            background_email_task,
+            to_email=ticket["email"],
+            full_name=ticket["full_name"],
+            ticket_number=ticket["ticket_number"],
+            tier=ticket["tier"],
+            amount=ticket["amount"],
+            security_hash=ticket["security_hash"],
+            created_at=ticket["created_at"],
+        )
+
+    return {
+        "success": True,
+        "message": f"Successfully created pass #{ticket['ticket_number']} for {ticket['full_name']}!",
+        "ticket": ticket,
     }
