@@ -18,6 +18,12 @@ echo -e "${BLUE}${BOLD}======================================================${N
 echo -e "${BLUE}${BOLD}   🚀 EchoSphere 2026 - Automated Backend Deployment  ${NC}"
 echo -e "${BLUE}${BOLD}======================================================${NC}"
 
+# 0. Pull latest code from GitHub if git repository detected
+if command -v git &> /dev/null && { [ -d ".git" ] || [ -d "../.git" ]; }; then
+    echo -e "${GREEN}[0/6] Pulling latest updates from GitHub (main)...${NC}"
+    git pull origin main || echo -e "${YELLOW}Notice: git pull skipped or working tree already up to date.${NC}"
+fi
+
 # 1. Resolve Script & Working Directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -34,27 +40,21 @@ fi
 
 echo -e "${GREEN}[1/6] Working directory:${NC} $BACKEND_DIR"
 
-# 2. Setup .env file from env.b64 (Ideal for UltraVNC where copy-paste is disabled)
-if [ ! -f ".env" ]; then
-    if [ -f "env.b64" ]; then
-        echo -e "${GREEN}[2/6] Restoring .env from env.b64 automatically...${NC}"
-        base64 -d env.b64 > .env
-        chmod 600 .env
-    elif [ -f "../env.b64" ]; then
-        echo -e "${GREEN}[2/6] Restoring .env from ../env.b64 automatically...${NC}"
-        base64 -d ../env.b64 > .env
-        chmod 600 .env
-    elif [ -f "env.txt" ]; then
-        echo -e "${GREEN}[2/6] Converting env.txt -> .env automatically...${NC}"
-        cp env.txt .env
-        chmod 600 .env
-    else
-        echo -e "${RED}[ERROR] Neither .env nor env.b64 found!${NC}"
-        exit 1
-    fi
-else
-    echo -e "${GREEN}[2/6] Active .env file confirmed.${NC}"
+# 2. Setup & Update .env file automatically (Guarantees ADMIN_EMAIL=shreyas.u.sondur@gmail.com)
+echo -e "${GREEN}[2/6] Updating .env configuration automatically...${NC}"
+
+# Decode embedded production base64 config directly into .env
+cat << 'ENV_B64_EOF' | base64 -d > .env
+UE9SVD04MDAyCkhPU1Q9MC4wLjAuMApDT1JTX09SSUdJTlM9aHR0cHM6Ly9lY2hvc3BoZXJlLnN1aWV0LndlYnNpdGUsaHR0cHM6Ly93d3cuZWNob3NwaGVyZS5zdWlldC53ZWJzaXRlLGh0dHA6Ly9sb2NhbGhvc3Q6MzAwMCxodHRwOi8vMTI3LjAuMC4xOjMwMDAsaHR0cDovLzEzLjE0MC4xNzIuMTE3OjgwMDIKU01UUF9FTUFJTD13ZWJmbG93Y29tbXVuaXR5QHNyaW5pdmFzdW5pdmVyc2l0eS5lZHUuaW4KU01UUF9QQVNTV09SRD1jYnFhcWlncnNmaWJwdmt6ClNNVFBfSE9TVD1zbXRwLmdtYWlsLmNvbQpTTVRQX1BPUlQ9NTg3ClBBWU1FTlRfR0FURVdBWV9LRVk9ClBBWU1FTlRfR0FURVdBWV9TRUNSRVQ9CkNBU0hGUkVFX0FQUF9JRD0xNDYwNzE1YmIwYmZhYmM0ZmMzYzczMGRiM2Q1MTcwNjQxCkNBU0hGUkVFX1NFQ1JFVF9LRVk9Y2Zza19tYV9wcm9kXzNjN2ZkYmY5YWI4YzY3Y2ExODAxMDBhOGNjZjQ1MDg5X2M2ZjZhZTA0CkNBU0hGUkVFX0FQSV9WRVJTSU9OPTIwMjMtMDgtMDEKQ0FTSEZSRUVfRU5WPXByb2R1Y3Rpb24KQ0FTSEZSRUVfUkVUVVJOX1VSTD1odHRwczovL2VjaG9zcGhlcmUuc3VpZXQud2Vic2l0ZS8/b3JkZXJfaWQ9e29yZGVyX2lkfQpTRUNSRVRfS0VZPWNvbmNlcnRfc2VjdXJlX3NlY3JldF90b2tlbl9uYWpyYW5fYmVuamlfOTgzNzQ5ODIzNDIzCkFETUlOX1BBU1NXT1JEPWlkb250a25vdwpBRE1JTl9FTUFJTD1zaHJleWFzLnUuc29uZHVyQGdtYWlsLmNvbQo=
+ENV_B64_EOF
+
+# Explicitly guarantee ADMIN_EMAIL is shreyas.u.sondur@gmail.com
+if ! grep -q "ADMIN_EMAIL=shreyas.u.sondur@gmail.com" .env; then
+    sed -i 's/^ADMIN_EMAIL=.*/ADMIN_EMAIL=shreyas.u.sondur@gmail.com/' .env || echo "ADMIN_EMAIL=shreyas.u.sondur@gmail.com" >> .env
 fi
+
+chmod 600 .env
+echo -e "${GREEN}✓ .env active and verified:${NC} ADMIN_EMAIL=shreyas.u.sondur@gmail.com | PORT=8002"
 
 # 3. Ensure Python3 and venv utilities are available
 echo -e "${GREEN}[3/6] Verifying Python 3 environment...${NC}"
@@ -75,7 +75,7 @@ fi
 
 source .venv/bin/activate
 pip install --upgrade pip --quiet 2>/dev/null || true
-echo -e "${GREEN}[4/6] Installing backend dependencies...${NC}"
+echo -e "${GREEN}[4/6] Installing/updating backend dependencies...${NC}"
 pip install -r requirements.txt --default-timeout=100
 
 # 5. Clean port 8002 & configure Background Daemon Service
@@ -158,8 +158,9 @@ if [ "$READY" -eq 1 ]; then
     echo -e "   • Local Health:  ${BOLD}http://127.0.0.1:8002/api/health${NC}"
     echo -e "   • Contabo VPS:   ${BOLD}http://13.140.172.117:8002${NC}"
     echo -e "   • Frontend:      ${BOLD}https://echosphere.suiet.website${NC}"
+    echo -e "   • Admin Email:   ${BOLD}shreyas.u.sondur@gmail.com${NC}"
     echo -e "   • Cashfree Mode: ${BOLD}Production (Approved)${NC}"
-    echo -e "   • SMTP Port:     ${BOLD}587 (No collision with other VPS projects)${NC}"
+    echo -e "   • SMTP Port:     ${BOLD}587 (Dual-port failover active)${NC}"
     echo -e "\n${BOLD}Backend is running cleanly in background via systemd!${NC}"
 else
     echo -e "${RED}[WARNING] Service started, but health check is taking longer to respond.${NC}"
