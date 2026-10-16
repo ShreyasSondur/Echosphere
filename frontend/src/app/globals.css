@@ -1,26 +1,49 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #060714;
+  --foreground: #f8fafc;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-geist-mono), monospace;
 }
 
 body {
-  background: var(--background);
+  background-color: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  background-image:
+    radial-gradient(circle at 15% 20%, rgba(139, 92, 246, 0.15) 0px, transparent 45%),
+    radial-gradient(circle at 85% 25%, rgba(59, 130, 246, 0.16) 0px, transparent 50%),
+    radial-gradient(circle at 50% 85%, rgba(168, 85, 247, 0.12) 0px, transparent 55%),
+    radial-gradient(circle at 50% 40%, rgba(37, 99, 235, 0.08) 0px, transparent 60%);
+  background-attachment: fixed;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #060714;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3b82f6;
+  border-radius: 9999px;
+}
+
+/* Force pointer cursor on all buttons and interactive elements */
+button,
+[role="button"],
+input[type="button"],
+input[type="submit"] {
+  cursor: pointer !important;
 }
