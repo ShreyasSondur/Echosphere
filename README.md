@@ -61,8 +61,46 @@ eco/
 ## API Endpoints
 
 - `GET /api/health`: Health probe & SMTP status
-- `GET /api/tickets/stats`: Live tickets sold, capacity, and next ticket ID (`001`)
-- `GET /api/tickets/tiers`: Available passes (`General Admission`, `VIP Fan Pit`, `Backstage All-Access`)
+- `GET /api/tickets/stats`: Live tickets sold, capacity, and next ticket ID
+- `GET /api/tickets/tier-settings`: Live pricing, strikethrough price, and scarcity metrics
+- `PUT /api/admin/tier-settings`: Admin endpoint to update live ticket price, strikethrough price, and scarcity
 - `POST /api/tickets/book`: Reserves next sequential pass, saves to DB, dispatches confirmation email
 - `GET /api/tickets/verify/{ticket_number}`: Gate security check verifying validity of ticket ID
-- `POST /api/tickets/test-email`: Verifies SMTP connectivity by sending a test ticket
+- `POST /api/admin/tickets/{ticket_number}/resend-email`: One-click resend confirmation email
+
+---
+
+## Deployment Setup
+
+### 1. Backend Deployment (Contabo VPS `13.140.172.117:8002`)
+To update the backend on the VPS:
+```bash
+# SSH into the VPS or open terminal via VNC
+ssh root@13.140.172.117
+
+# Navigate to project directory
+cd /root/Echosphere || cd /var/www/Echosphere || cd ~/eco
+
+# Pull the latest commits from GitHub
+git pull origin main
+
+# Execute automated deployment script
+bash deploy.sh
+```
+`deploy.sh` automatically:
+1. Restores `.env` from `env.b64` (with `ADMIN_EMAIL=shreyas.u.sondur@gmail.com`).
+2. Installs backend dependencies in `.venv`.
+3. Restarts the `echosphere-backend.service` systemd service.
+4. Verifies health status via `http://127.0.0.1:8002/api/health`.
+
+### 2. Frontend Deployment (`echosphere.suiet.website`)
+* **Vercel (Automatic):** Pushing to `origin/main` automatically triggers a build and deploy on Vercel.
+* **Manual / VPS Node.js Server:**
+```bash
+cd frontend
+git pull origin main
+npm install
+npm run build
+pm2 restart frontend || npm run start
+```
+
