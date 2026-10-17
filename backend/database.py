@@ -466,6 +466,14 @@ def mark_order_completed(order_id: str):
         conn.commit()
         conn.close()
 
+def mark_order_failed(order_id: str, reason: str = "Payment failed"):
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE pending_orders SET status = 'FAILED' WHERE order_id = ?", (order_id,))
+        conn.commit()
+        conn.close()
+
 # -------------------------------------------------------------
 # 2FA Admin OTP & Session Authentication
 # -------------------------------------------------------------

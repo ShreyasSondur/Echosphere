@@ -74,7 +74,7 @@ def send_ticket_confirmation_email(
     """
     try:
         smtp_sender = os.getenv("SMTP_EMAIL", "webflowcommunity@srinivasuniversity.edu.in").strip()
-        subject = f"🎟️ Pass Confirmed: Najran Kabeer × Benji Beats Live | EchoSphere 2026 [#{ticket_number}]"
+        subject = f"🎟️ Pass Confirmed: Najran Kabeer × Benjamin Solomon Live | EchoSphere 2026 [#{ticket_number}]"
 
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -86,7 +86,7 @@ def send_ticket_confirmation_email(
         text_body = f"""
 ================================================================================
 ECHOSPHERE 2026 — OFFICIAL CONCERT ENTRY PASS
-Najran Kabeer × Benji Beats Live in Concert
+Najran Kabeer × Benjamin Solomon Live in Concert
 Presented by Webflow Community in collaboration with Rotaract
 ================================================================================
 
@@ -378,7 +378,7 @@ Srinivas University Mukka Campus Helpdesk
     <div class="header-banner">
       <div class="org-subtitle">Webflow Community × Rotaract Presents</div>
       <h1 class="event-title">ECHOSPHERE 2026</h1>
-      <div class="artist-tag">Najran Kabeer × Benji Beats Live in Concert</div>
+      <div class="artist-tag">Najran Kabeer × Benjamin Solomon Live in Concert</div>
     </div>
 
     <!-- Main Content Area -->

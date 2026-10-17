@@ -3,8 +3,27 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 
-export default function ConcertCanvas3D() {
+interface ConcertCanvas3DProps {
+  isLoading?: boolean;
+  loadingProgress?: number;
+}
+
+export default function ConcertCanvas3D({
+  isLoading = false,
+  loadingProgress = 0,
+}: ConcertCanvas3DProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const isLoadingRef = useRef(isLoading);
+  const loadingProgressRef = useRef(loadingProgress);
+
+  // Sync state into refs for 60fps render loop without scene recreation
+  useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
+
+  useEffect(() => {
+    loadingProgressRef.current = loadingProgress;
+  }, [loadingProgress]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -12,23 +31,23 @@ export default function ConcertCanvas3D() {
 
     // Scene & Fog
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x060714, 0.04);
+    scene.fog = new THREE.FogExp2(0x060714, 0.038);
 
-    // Camera
+    // Camera (Starts closer during loading, smoothly glides back for hero)
     const camera = new THREE.PerspectiveCamera(
       45,
       container.clientWidth / container.clientHeight,
       0.1,
       100
     );
-    camera.position.set(0, 0.4, 7.8);
+    camera.position.set(0, 0.2, 5.2);
 
     // WebGL Renderer
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.25;
+    renderer.toneMappingExposure = 1.3;
     container.appendChild(renderer.domElement);
 
     // Main 3D Rig Group
@@ -46,7 +65,7 @@ export default function ConcertCanvas3D() {
       color: 0x8b5cf6,
       wireframe: true,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.38,
     });
     const echoSphereMesh = new THREE.Mesh(sphereGeo, sphereWireMat);
     sphereGroup.add(echoSphereMesh);
@@ -56,11 +75,11 @@ export default function ConcertCanvas3D() {
     const coreMat = new THREE.MeshStandardMaterial({
       color: 0x3b82f6,
       emissive: 0x1d4ed8,
-      emissiveIntensity: 0.8,
-      roughness: 0.2,
+      emissiveIntensity: 0.85,
+      roughness: 0.18,
       metalness: 0.9,
       transparent: true,
-      opacity: 0.25,
+      opacity: 0.3,
     });
     const coreMesh = new THREE.Mesh(coreGeo, coreMat);
     sphereGroup.add(coreMesh);
@@ -151,7 +170,7 @@ export default function ConcertCanvas3D() {
     const purpleRingMat = new THREE.MeshStandardMaterial({
       color: 0xa855f7,
       emissive: 0x9333ea,
-      emissiveIntensity: 0.4,
+      emissiveIntensity: 0.5,
       metalness: 0.9,
       roughness: 0.2,
       side: THREE.DoubleSide,
@@ -160,7 +179,7 @@ export default function ConcertCanvas3D() {
     const blueRingMat = new THREE.MeshStandardMaterial({
       color: 0x3b82f6,
       emissive: 0x2563eb,
-      emissiveIntensity: 0.4,
+      emissiveIntensity: 0.5,
       metalness: 0.9,
       roughness: 0.2,
       side: THREE.DoubleSide,
@@ -178,85 +197,138 @@ export default function ConcertCanvas3D() {
     stageRig.add(orbitGroup);
 
     // -------------------------------------------------------------
-    // 4. Circular Audio Wave Visualizer Bars
+    // 4. Stardust Cosmic Particle Cloud
     // -------------------------------------------------------------
-    const visualizerBars: THREE.Mesh[] = [];
-    const barCount = 48;
-    const visualizerRadius = 2.0;
+    const particleCount = 450;
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(particleCount * 3);
+    const colors = new Float32Array(particleCount * 3);
 
-    const barMaterial = new THREE.MeshStandardMaterial({
-      color: 0x60a5fa,
-      emissive: 0x3b82f6,
-      emissiveIntensity: 0.8,
-      metalness: 0.8,
-      roughness: 0.2,
+    const color1 = new THREE.Color(0xa855f7); // Purple
+    const color2 = new THREE.Color(0x3b82f6); // Blue
+    const color3 = new THREE.Color(0x38bdf8); // Sky blue
+    const color4 = new THREE.Color(0xc084fc); // Light violet
+
+    const colorChoices = [color1, color2, color3, color4];
+
+    for (let i = 0; i < particleCount; i++) {
+      const radius = 2.5 + Math.random() * 6.5;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 2 - 1);
+
+      positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta) * 0.7;
+      positions[i * 3 + 2] = radius * Math.cos(phi);
+
+      const chosenColor = colorChoices[Math.floor(Math.random() * colorChoices.length)];
+      colors[i * 3] = chosenColor.r;
+      colors[i * 3 + 1] = chosenColor.g;
+      colors[i * 3 + 2] = chosenColor.b;
+    }
+
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
+    const particleMat = new THREE.PointsMaterial({
+      size: 0.05,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.75,
+      blending: THREE.AdditiveBlending,
+    });
+
+    const particles = new THREE.Points(geometry, particleMat);
+    scene.add(particles);
+
+    // -------------------------------------------------------------
+    // 5. Soundstage Audio Wave Visualizer Bars
+    // -------------------------------------------------------------
+    const visualizerGroup = new THREE.Group();
+    const barCount = 28;
+    const barRadius = 3.6;
+    const visualizerBars: THREE.Mesh[] = [];
+
+    const barMat = new THREE.MeshStandardMaterial({
+      color: 0x818cf8,
+      emissive: 0x6366f1,
+      emissiveIntensity: 0.5,
+      metalness: 0.7,
+      roughness: 0.3,
     });
 
     for (let i = 0; i < barCount; i++) {
       const angle = (i / barCount) * Math.PI * 2;
-      const barGeo = new THREE.BoxGeometry(0.04, 0.55, 0.04);
-      const bar = new THREE.Mesh(barGeo, barMaterial);
+      const barGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.55, 12);
+      const bar = new THREE.Mesh(barGeo, barMat);
       bar.position.set(
-        Math.cos(angle) * visualizerRadius,
-        0,
-        Math.sin(angle) * visualizerRadius
+        Math.cos(angle) * barRadius,
+        -1.3,
+        Math.sin(angle) * barRadius
       );
-      bar.rotation.y = -angle;
-      stageRig.add(bar);
+      visualizerGroup.add(bar);
       visualizerBars.push(bar);
     }
+    stageRig.add(visualizerGroup);
 
     // -------------------------------------------------------------
-    // 5. Floating Stage Stardust Particles
+    // 6. Stage Spotlights & Dynamic Concert Lasers
     // -------------------------------------------------------------
-    const particleCount = 800;
-    const particleGeo = new THREE.BufferGeometry();
-    const positions = new Float32Array(particleCount * 3);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    keyLight.position.set(3, 8, 6);
+    scene.add(keyLight);
 
-    for (let i = 0; i < particleCount; i++) {
-      positions[i * 3] = (Math.random() - 0.5) * 16;
-      positions[i * 3 + 1] = (Math.random() - 0.5) * 12;
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 12;
-    }
+    const fillLight = new THREE.DirectionalLight(0x818cf8, 1.2);
+    fillLight.position.set(-6, -2, -4);
+    scene.add(fillLight);
 
-    particleGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-
-    const particleMat = new THREE.PointsMaterial({
-      color: 0xa5b4fc,
-      size: 0.038,
-      transparent: true,
-      opacity: 0.65,
-      blending: THREE.AdditiveBlending,
-    });
-
-    const particles = new THREE.Points(particleGeo, particleMat);
-    scene.add(particles);
-
-    // -------------------------------------------------------------
-    // 6. Lighting (Deep Purple & Blue Stage Neons)
-    // -------------------------------------------------------------
-    const ambientLight = new THREE.AmbientLight(0x0c0f24, 3.0);
-    scene.add(ambientLight);
-
-    const purpleSpot = new THREE.SpotLight(0xa855f7, 18, 25, Math.PI / 4, 0.5);
-    purpleSpot.position.set(5, 6, 4);
+    const purpleSpot = new THREE.SpotLight(0xa855f7, 28, 32, Math.PI / 4, 0.35);
+    purpleSpot.position.set(5, 7, 5);
     scene.add(purpleSpot);
 
-    const blueSpot = new THREE.SpotLight(0x3b82f6, 18, 25, Math.PI / 4, 0.5);
-    blueSpot.position.set(-5, 5, 5);
+    const blueSpot = new THREE.SpotLight(0x38bdf8, 28, 32, Math.PI / 4, 0.35);
+    blueSpot.position.set(-5, 7, 5);
     scene.add(blueSpot);
 
-    const cyanRim = new THREE.PointLight(0x38bdf8, 7, 15);
+    const pinkSpot = new THREE.SpotLight(0xf43f5e, 22, 28, Math.PI / 4.5, 0.4);
+    pinkSpot.position.set(0, 8, 4);
+    scene.add(pinkSpot);
+
+    const cyanRim = new THREE.PointLight(0x38bdf8, 10, 18);
     cyanRim.position.set(0, -2, -3);
     scene.add(cyanRim);
 
+    // Laser Beams (Sweeping Arena Lasers)
+    const laserGroup = new THREE.Group();
+    const laserMatCyan = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.45,
+    });
+    const laserMatPink = new THREE.MeshBasicMaterial({
+      color: 0xf43f5e,
+      transparent: true,
+      opacity: 0.45,
+    });
+
+    const laserBeams: THREE.Mesh[] = [];
+    for (let i = 0; i < 4; i++) {
+      const beamGeo = new THREE.CylinderGeometry(0.015, 0.05, 12, 8);
+      const beam = new THREE.Mesh(beamGeo, i % 2 === 0 ? laserMatCyan : laserMatPink);
+      beam.position.set((i - 1.5) * 2.2, 3, -1);
+      beam.rotation.z = (i - 1.5) * 0.25;
+      laserGroup.add(beam);
+      laserBeams.push(beam);
+    }
+    stageRig.add(laserGroup);
+
     // -------------------------------------------------------------
-    // 7. Interactive Cursor Parallax & Render Loop
+    // 7. Parallax & Smooth Synchronized Render Loop
     // -------------------------------------------------------------
     let mouseX = 0;
     let mouseY = 0;
     let targetX = 0;
     let targetY = 0;
+    let currentScale = 1.0;
 
     const onMouseMove = (event: MouseEvent) => {
       const halfW = window.innerWidth / 2;
@@ -265,7 +337,18 @@ export default function ConcertCanvas3D() {
       targetY = (event.clientY - halfH) / halfH;
     };
 
+    const onTouchMove = (event: TouchEvent) => {
+      if (event.touches.length > 0) {
+        const touch = event.touches[0];
+        const halfW = window.innerWidth / 2;
+        const halfH = window.innerHeight / 2;
+        targetX = (touch.clientX - halfW) / halfW;
+        targetY = (touch.clientY - halfH) / halfH;
+      }
+    };
+
     window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("touchmove", onTouchMove, { passive: true });
 
     let animationFrameId: number;
     const startTime = performance.now();
@@ -274,36 +357,97 @@ export default function ConcertCanvas3D() {
       animationFrameId = requestAnimationFrame(animate);
       const elapsed = (performance.now() - startTime) * 0.001;
 
+      const isLoad = isLoadingRef.current;
+      const progress = loadingProgressRef.current;
+
+      const clientW = container.clientWidth || window.innerWidth || 390;
+      const clientH = container.clientHeight || window.innerHeight || 844;
+      const aspect = clientW / clientH;
+      const isMobile = aspect < 0.85 || clientW < 640;
+      const isTablet = !isMobile && (aspect < 1.15 || clientW < 1024);
+
+      // Responsive rig scale so the 3D model, rings & visualizers fit with generous margins on phones
+      const targetScale = isMobile
+        ? (clientW < 400 ? 0.48 : 0.54)
+        : isTablet
+        ? 0.72
+        : 1.0;
+
+      currentScale += (targetScale - currentScale) * 0.05;
+      stageRig.scale.set(currentScale, currentScale, currentScale);
+
       // Mouse lerp
       mouseX += (targetX - mouseX) * 0.05;
       mouseY += (targetY - mouseY) * 0.05;
 
+      // Dynamic Stage Spotlights Sweep (Concert searchlights)
+      purpleSpot.position.x = Math.sin(elapsed * 1.4) * 6.5;
+      purpleSpot.position.y = 6.5 + Math.cos(elapsed * 0.8) * 1.5;
+      blueSpot.position.x = -Math.cos(elapsed * 1.3) * 6.5;
+      blueSpot.position.y = 6.5 + Math.sin(elapsed * 0.9) * 1.5;
+      pinkSpot.position.x = Math.sin(elapsed * 2.1) * 3.5;
+
+      // Sweeping Laser Beams
+      laserBeams.forEach((beam, idx) => {
+        const sign = idx % 2 === 0 ? 1 : -1;
+        beam.rotation.z = Math.sin(elapsed * 1.8 + idx * 0.8) * 0.35 * sign;
+        beam.rotation.x = Math.cos(elapsed * 1.2 + idx * 0.5) * 0.2;
+        (beam.material as THREE.MeshBasicMaterial).opacity =
+          isLoad ? 0.35 + (progress / 100) * 0.35 : 0.45;
+      });
+
+      // Camera Smooth Glide Synchronization (Mobile Optimized):
+      // On mobile phones:
+      // - Loading: Z: 6.5, Y: 0.16 (centered inside the mobile HUD target reticle)
+      // - Hero: Z: 8.6, Y: -0.42 (positions the 3D model in the upper half of the screen, floating above hero details)
+      // On desktop:
+      // - Loading: Z: 5.15, Y: 0.18
+      // - Hero: Z: 7.8, Y: 0.35
+      const targetCamZ = isLoad
+        ? (isMobile ? 6.5 : 5.15)
+        : (isMobile ? 8.6 : 7.8);
+      const targetCamY = isLoad
+        ? (isMobile ? 0.16 : 0.18)
+        : (isMobile ? -0.42 : 0.35);
+
+      camera.position.z += (targetCamZ - camera.position.z) * 0.045;
+      camera.position.y += (targetCamY - camera.position.y) * 0.045;
+
+      // Energy multiplier (builds up as loading progresses from 0 to 100%)
+      const energy = isLoad ? 1.0 + (progress / 100) * 1.6 : 1.0;
+
       // Stage rig rotation & float
-      stageRig.rotation.y = elapsed * 0.22 + mouseX * 0.5;
-      stageRig.rotation.x = Math.sin(elapsed * 0.5) * 0.05 - mouseY * 0.3;
-      stageRig.position.y = Math.sin(elapsed * 1.1) * 0.12;
+      const rotSpeed = isLoad ? 0.35 * energy : 0.22;
+      stageRig.rotation.y = elapsed * rotSpeed + mouseX * 0.45;
+      stageRig.rotation.x = Math.sin(elapsed * 0.6) * 0.05 - mouseY * 0.25;
+      stageRig.position.y = Math.sin(elapsed * 1.2) * 0.1;
 
       // EchoSphere pulsating wireframe rotation
-      echoSphereMesh.rotation.y = elapsed * 0.35;
-      echoSphereMesh.rotation.x = elapsed * 0.2;
-      const sphereScale = 1.0 + Math.sin(elapsed * 2.5) * 0.06;
+      echoSphereMesh.rotation.y = elapsed * 0.4 * energy;
+      echoSphereMesh.rotation.x = elapsed * 0.22 * energy;
+      // Pulsate to exact 122 BPM pop beat (12.78 rad/sec)
+      const popBeat = Math.sin(elapsed * 12.78) > 0.6 ? 0.08 : 0.0;
+      const sphereScale = 1.0 + (isLoad ? 0.04 + (progress / 100) * 0.05 : 0.02) + popBeat;
       echoSphereMesh.scale.set(sphereScale, sphereScale, sphereScale);
 
-      // Rings rotation
-      ring1.rotation.z = elapsed * 0.35;
-      ring2.rotation.z = -elapsed * 0.25;
+      // Core sphere emissive glow boost on the pop kick drum
+      coreMat.emissiveIntensity = (isLoad ? 0.95 + (progress / 100) * 0.7 : 0.85) + (popBeat * 2.5);
 
-      // Visualizer bars pulsation
+      // Orbit rings rotation (dynamic gyroscopic spin)
+      ring1.rotation.z = elapsed * 0.55 * energy;
+      ring2.rotation.z = -elapsed * 0.45 * energy;
+
+      // Visualizer bars pulsation locked to 122 BPM pop beat
       visualizerBars.forEach((bar, index) => {
-        const freq = Math.sin(elapsed * 4 + index * 0.4) * 0.5 + 0.5;
-        const beat = Math.sin(elapsed * 8) > 0.8 ? 0.3 : 0;
-        const scaleY = 0.35 + freq * 1.5 + beat;
+        const wave = Math.sin(elapsed * 6.39 + index * 0.4) * 0.4 + 0.5;
+        const kickImpact = popBeat > 0 ? 0.6 : 0;
+        const scaleY = 0.35 + (wave * 1.5 + kickImpact) * (isLoad ? 1.4 : 1.1);
         bar.scale.set(1, scaleY, 1);
         bar.position.y = (scaleY * 0.55) / 2 - 0.3;
       });
 
       // Stardust drift
-      particles.rotation.y = elapsed * 0.02;
+      particles.rotation.y = elapsed * 0.025 * energy;
       particles.rotation.x = elapsed * 0.015;
 
       renderer.render(scene, camera);
@@ -323,6 +467,7 @@ export default function ConcertCanvas3D() {
 
     return () => {
       window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("resize", onResize);
       cancelAnimationFrame(animationFrameId);
       renderer.dispose();

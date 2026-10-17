@@ -31,6 +31,7 @@ from database import (
     save_pending_order,
     get_pending_order,
     mark_order_completed,
+    mark_order_failed,
     get_all_tickets,
     checkin_ticket,
     undo_checkin_ticket,
@@ -265,7 +266,7 @@ def root():
         "event": "EchoSphere 2026",
         "organizers": "Webflow Community in collaboration with Rotaract",
         "venue": "Srinivas University Mukka (SUIET Campus)",
-        "artists": "Najran Kabeer × Benji Beats",
+        "artists": "Najran Kabeer × Benjamin Solomon",
         "date": "2nd November 2026",
         "time": "5:30 PM IST",
         "port": PORT,
@@ -314,8 +315,8 @@ def list_tiers():
             "savings": settings["savings"],
             "perks": [
                 "Full amphitheatre arena access at Srinivas University Mukka",
-                "Live concert entry for Najran Kabeer × Benji Beats",
-                "Official EchoSphere Digital Security Pass with Barcode",
+                "Live concert entry for Najran Kabeer × Benjamin Solomon",
+                "Official EchoSphere Digital Security Pass",
                 "Complimentary food & festival stalls access",
             ],
         }
@@ -408,12 +409,65 @@ def create_order(payload: CreateCashfreeOrderRequest):
 def verify_order(order_id: str):
     try:
         res = verify_cashfree_order(order_id)
-        return {"success": True, "data": res}
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Verification failed: {str(e)}",
+        cf_status = str(res.get("order_status", "")).upper()
+        
+        # Check payments for any successful or failed attempts
+        payments = []
+        try:
+            payments = get_order_payments(order_id)
+        except Exception as e:
+            logger.warning(f"Could not retrieve payments for {order_id}: {e}")
+            payments = []
+
+        is_paid = (cf_status in ("PAID", "SUCCESS")) or any(
+            str(p.get("payment_status", "")).upper() == "SUCCESS" for p in payments
         )
+
+        is_failed = False
+        if not is_paid:
+            if cf_status in ("FAILED", "EXPIRED", "TERMINATED", "USER_DROPPED", "CANCELLED"):
+                is_failed = True
+            elif payments and all(
+                str(p.get("payment_status", "")).upper() in ("FAILED", "USER_DROPPED", "CANCELLED")
+                for p in payments
+            ):
+                is_failed = True
+            elif cf_status == "ACTIVE" and len(payments) > 0:
+                is_failed = any(
+                    str(p.get("payment_status", "")).upper() in ("FAILED", "USER_DROPPED", "CANCELLED")
+                    for p in payments
+                )
+
+        if is_failed:
+            logger.info(f"Order {order_id} marked as FAILED in DB (cf_status={cf_status})")
+            mark_order_failed(order_id, reason=f"Order status: {cf_status}")
+
+        return {
+            "success": True,
+            "data": res,
+            "order_status": cf_status,
+            "is_paid": is_paid,
+            "is_failed": is_failed,
+            "payments": payments,
+        }
+    except Exception as e:
+        logger.error(f"Error verifying Cashfree order {order_id}: {e}")
+        mark_order_failed(order_id, reason=str(e))
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "success": False,
+                "is_paid": False,
+                "is_failed": True,
+                "detail": f"Verification failed: {str(e)}",
+            },
+        )
+
+@app.post("/api/payment/cashfree/fail-order/{order_id}")
+def fail_order(order_id: str):
+    """Explicitly marks an order as failed when canceled or dropped by user."""
+    mark_order_failed(order_id, reason="Client reported payment failure")
+    return {"success": True, "message": f"Order {order_id} marked as failed. No tickets registered."}
 
 @app.get("/api/payment/cashfree/order/{order_id}/payments")
 def get_payments(order_id: str):
@@ -476,7 +530,7 @@ def fulfill_booking(
             "event_details": {
                 "title": "EchoSphere 2026",
                 "organizers": "Webflow Community in collaboration with Rotaract",
-                "artists": "Najran Kabeer × Benji Beats",
+                "artists": "Najran Kabeer × Benjamin Solomon",
                 "date": "2nd November 2026",
                 "time": "5:30 PM IST",
                 "venue": "Srinivas University Mukka (SUIET)",
@@ -505,9 +559,10 @@ def fulfill_booking(
                 has_success = False
 
             if not has_success:
+                mark_order_failed(order_id, reason=f"Order status: {cf_status}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Order {order_id} is not PAID on Cashfree (Current Status: {cf_status}).",
+                    detail=f"Order {order_id} is not PAID on Cashfree (Current Status: {cf_status}). Tickets cannot be registered.",
                 )
 
     # 3. Retrieve attendees and tier details
@@ -629,7 +684,7 @@ def fulfill_booking(
         "event_details": {
             "title": "EchoSphere 2026",
             "organizers": "Webflow Community in collaboration with Rotaract",
-            "artists": "Najran Kabeer × Benji Beats",
+            "artists": "Najran Kabeer × Benjamin Solomon",
             "date": "2nd November 2026",
             "time": "5:30 PM IST",
             "venue": "Srinivas University Mukka (SUIET)",
@@ -702,6 +757,9 @@ async def cashfree_webhook(request: Request, background_tasks: BackgroundTasks):
             logger.info(f"Webhook successfully fulfilled order {order_id}")
         except Exception as e:
             logger.error(f"Error fulfilling order {order_id} via webhook: {e}")
+    elif order_id and any(term in event_type for term in ("FAILED", "USER_DROPPED", "CANCELLED", "EXPIRED")):
+        logger.info(f"Cashfree webhook indicates payment failed for order {order_id} (type={event_type})")
+        mark_order_failed(order_id, reason=f"Webhook event: {event_type}")
 
     return {"status": "OK", "order_id": order_id}
 

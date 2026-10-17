@@ -835,7 +835,7 @@ export default function AdminGatePage() {
                 </span>
               </h1>
               <p className="text-xs text-slate-400">
-                Najran Kabeer × Benji Beats Live • 2nd November 2026
+                Najran Kabeer × Benjamin Solomon Live • 2nd November 2026
               </p>
             </div>
 

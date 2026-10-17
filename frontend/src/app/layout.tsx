@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
@@ -13,10 +13,16 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+};
+
 export const metadata: Metadata = {
   title: "EchoSphere 2026 | Webflow × Rotaract | Srinivas University Mukka",
   description:
-    "Official ticket booking platform for EchoSphere 2026 featuring Najran Kabeer and Benji Beats. Live on 2nd November at Srinivas University Mukka (SUIET).",
+    "Official ticket booking platform for EchoSphere 2026 featuring Najran Kabeer and Benjamin Solomon. Live on 2nd November at Srinivas University Mukka (SUIET).",
 };
 
 export default function RootLayout({

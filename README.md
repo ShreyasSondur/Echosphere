@@ -1,4 +1,4 @@
-# Najran Kabeer & Benji Beats Live — Concert Ticketing Platform
+# Najran Kabeer & Benjamin Solomon Live — Concert Ticketing Platform
 
 A full-stack, high-security concert ticketing website built with **Next.js 16 (Turbopack, Three.js, Tailwind CSS v4)** and **FastAPI** running on **Port 8002**.
 
