@@ -229,6 +229,18 @@ export default function Home() {
         const isPaid = verData?.is_paid === true || status === "PAID" || status === "SUCCESS";
 
         if (isPaid) {
+          // If verify-order already fulfilled tickets on the backend, display them immediately!
+          const preFulfilledList = verData?.tickets || (verData?.ticket ? [verData.ticket] : null);
+          if (preFulfilledList && preFulfilledList.length > 0) {
+            sessionStorage.removeItem("echosphere_pending_order");
+            setConfirmedTickets(preFulfilledList);
+            setPaymentFailure(null);
+            setIsBookingOpen(true);
+            fetchStats();
+            return;
+          }
+
+          // Fallback if tickets need manual secondary fulfillment
           const cust = orderData?.customer_details || {};
           const fallbackAttendees = [
             {

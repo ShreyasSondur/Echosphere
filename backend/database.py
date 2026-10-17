@@ -474,6 +474,107 @@ def mark_order_failed(order_id: str, reason: str = "Payment failed"):
         conn.commit()
         conn.close()
 
+def get_unfulfilled_pending_orders() -> list[Dict[str, Any]]:
+    """
+    Returns all orders from pending_orders that do not have matching issued tickets.
+    Used by the reconciliation engine to recover orders where users paid on Cashfree
+    but closed their browser tab before redirect / booking fulfillment completed.
+    """
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT p.* FROM pending_orders p
+            WHERE NOT EXISTS (
+                SELECT 1 FROM tickets t WHERE t.payment_id = p.order_id
+            )
+            ORDER BY p.created_at ASC
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        orders = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["attendees"] = json.loads(d.get("attendees_json", "[]"))
+            except Exception:
+                d["attendees"] = []
+            orders.append(d)
+        return orders
+
+def get_pending_order_by_buyer(email: str, phone: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Finds the most recent pending order matching the buyer's email or phone number.
+    Used by payment gateway webhooks (e.g. KonfHub) to retrieve the full attendee list
+    entered by the user on the website form.
+    """
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        clean_email = (email or "").strip().lower()
+        
+        # 1. Try match by email
+        cursor.execute(
+            """
+            SELECT * FROM pending_orders 
+            WHERE LOWER(customer_email) = ? 
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (clean_email,)
+        )
+        row = cursor.fetchone()
+        
+        # 2. Try match by phone if not found
+        if not row and phone:
+            digits = "".join(filter(str.isdigit, str(phone)))
+            if len(digits) >= 10:
+                last10 = digits[-10:]
+                cursor.execute(
+                    """
+                    SELECT * FROM pending_orders 
+                    WHERE customer_phone LIKE ? 
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (f"%{last10}%",)
+                )
+                row = cursor.fetchone()
+                
+        conn.close()
+        if not row:
+            return None
+        res = dict(row)
+        try:
+            res["attendees"] = json.loads(res.get("attendees_json", "[]"))
+        except Exception:
+            res["attendees"] = []
+        return res
+
+def get_all_pending_orders(limit: int = 100) -> list[Dict[str, Any]]:
+    """
+    Returns recent pending orders for admin visibility.
+    """
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM pending_orders ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        orders = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["attendees"] = json.loads(d.get("attendees_json", "[]"))
+            except Exception:
+                d["attendees"] = []
+            orders.append(d)
+        return orders
+
+
 # -------------------------------------------------------------
 # 2FA Admin OTP & Session Authentication
 # -------------------------------------------------------------

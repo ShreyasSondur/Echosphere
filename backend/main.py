@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 import re
 import time
+import asyncio
 import logging
 import secrets
 from typing import Optional, Dict
 from collections import defaultdict
-from fastapi import FastAPI, HTTPException, Request, Response, BackgroundTasks, Depends, status
+from fastapi import FastAPI, HTTPException, Request, Response, BackgroundTasks, Depends, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pathlib import Path
@@ -30,6 +31,9 @@ from database import (
     get_tickets_by_payment_id,
     save_pending_order,
     get_pending_order,
+    get_pending_order_by_buyer,
+    get_all_pending_orders,
+    get_unfulfilled_pending_orders,
     mark_order_completed,
     mark_order_failed,
     get_all_tickets,
@@ -212,6 +216,15 @@ class CreateCashfreeOrderRequest(BaseModel):
     tier: Optional[str] = Field(default="Early Bird Ticket", description="Ticket tier")
     attendees: Optional[list[AttendeeItem]] = Field(default=None, description="List of attendees")
     return_url: Optional[str] = Field(default=None, description="Optional return URL after checkout")
+
+class InitiateKonfHubRequest(BaseModel):
+    customer_name: str = Field(..., description="Primary customer name")
+    customer_email: str = Field(..., description="Primary customer email")
+    customer_phone: str = Field(..., description="Primary customer phone")
+    ticket_count: int = Field(default=1, ge=1, le=20, description="Number of tickets")
+    tier: Optional[str] = Field(default="Early Bird Ticket", description="Ticket tier")
+    amount: Optional[float] = Field(default=349.0, description="Ticket price")
+    attendees: Optional[list[AttendeeItem]] = Field(default=None, description="List of attendees")
 
 class TicketBookingRequest(BaseModel):
     tier: str = Field(default="Early Bird Ticket", description="Selected ticket tier")
@@ -406,7 +419,7 @@ def create_order(payload: CreateCashfreeOrderRequest):
         )
 
 @app.post("/api/payment/cashfree/verify-order/{order_id}")
-def verify_order(order_id: str):
+def verify_order(order_id: str, background_tasks: BackgroundTasks):
     try:
         res = verify_cashfree_order(order_id)
         cf_status = str(res.get("order_status", "")).upper()
@@ -422,6 +435,14 @@ def verify_order(order_id: str):
         is_paid = (cf_status in ("PAID", "SUCCESS")) or any(
             str(p.get("payment_status", "")).upper() == "SUCCESS" for p in payments
         )
+
+        fulfillment = None
+        if is_paid:
+            try:
+                # Fulfill booking immediately and idempotently right inside verify_order
+                fulfillment = fulfill_booking(order_id=order_id, background_tasks=background_tasks)
+            except Exception as f_err:
+                logger.error(f"Error auto-fulfilling booking in verify_order for {order_id}: {f_err}")
 
         is_failed = False
         if not is_paid:
@@ -449,6 +470,8 @@ def verify_order(order_id: str):
             "is_paid": is_paid,
             "is_failed": is_failed,
             "payments": payments,
+            "tickets": fulfillment.get("tickets") if fulfillment else None,
+            "ticket": fulfillment.get("ticket") if fulfillment else None,
         }
     except Exception as e:
         logger.error(f"Error verifying Cashfree order {order_id}: {e}")
@@ -479,6 +502,73 @@ def get_payments(order_id: str):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Could not retrieve payment details: {str(e)}",
         )
+
+# -------------------------------------------------------------
+# KonfHub Ticketing & Payment Gateway Endpoints
+# -------------------------------------------------------------
+KONFHUB_EVENT_URL = os.getenv("KONFHUB_EVENT_URL", "https://konfhub.com/echosphere-20").strip()
+
+@app.get("/api/payment/konfhub/status")
+def konfhub_status():
+    return {
+        "active": True,
+        "gateway": "konfhub",
+        "event_url": KONFHUB_EVENT_URL,
+    }
+
+@app.post("/api/payment/konfhub/initiate")
+def initiate_konfhub_order(payload: InitiateKonfHubRequest):
+    """
+    Step 1: Save attendee intent in pending_orders table BEFORE redirecting to KonfHub.
+    This guarantees 100% data capture and zero data loss on the backend!
+    """
+    stats = get_ticket_stats()
+    if stats["available_tickets"] < (payload.ticket_count or 1):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Only {stats['available_tickets']} ticket(s) remaining for EchoSphere.",
+        )
+
+    order_id = f"KH_INIT_{int(time.time() * 1000)}_{secrets.token_hex(3)}"
+    tier_name = payload.tier or "Early Bird Ticket"
+    tier_info = get_tier_settings(tier_name)
+    per_ticket_price = tier_info.get("price", 349.0)
+    final_amount = round(per_ticket_price * (payload.ticket_count or 1), 2)
+
+    attendee_dicts = []
+    if payload.attendees and len(payload.attendees) > 0:
+        attendee_dicts = [
+            {"full_name": a.full_name.strip(), "email": a.email.strip().lower(), "phone": a.phone.strip()}
+            for a in payload.attendees
+        ]
+    else:
+        attendee_dicts = [
+            {
+                "full_name": payload.customer_name.strip(),
+                "email": payload.customer_email.strip().lower(),
+                "phone": payload.customer_phone.strip(),
+            }
+        ]
+
+    save_pending_order(
+        order_id=order_id,
+        customer_name=payload.customer_name.strip(),
+        customer_email=payload.customer_email.strip().lower(),
+        customer_phone=payload.customer_phone.strip(),
+        tier=tier_name,
+        ticket_count=payload.ticket_count or 1,
+        amount=final_amount,
+        attendees=attendee_dicts,
+    )
+
+    logger.info(f"Saved KonfHub checkout intent for {payload.customer_email} ({order_id})")
+
+    return {
+        "success": True,
+        "order_id": order_id,
+        "redirect_url": KONFHUB_EVENT_URL,
+        "amount": final_amount,
+    }
 
 # -------------------------------------------------------------
 # Fulfill Booking Helper (Used by API & Webhook)
@@ -570,15 +660,21 @@ def fulfill_booking(
     attendees: list[AttendeeItem] = []
     tier = requested_tier or (pending["tier"] if pending else "Early Bird Ticket")
     
-    if requested_attendees and len(requested_attendees) > 0:
+    has_valid_requested = (
+        requested_attendees
+        and len(requested_attendees) > 0
+        and not any("attendee@srinivasuniversity.edu.in" in a.email for a in requested_attendees)
+    )
+
+    if has_valid_requested:
         attendees = requested_attendees
     elif pending and pending.get("attendees"):
         for a in pending["attendees"]:
             attendees.append(
                 AttendeeItem(
                     full_name=a.get("full_name") or a.get("fullName", "Attendee"),
-                    email=a.get("email", ""),
-                    phone=a.get("phone", "9876543210"),
+                    email=a.get("email") or pending.get("customer_email", ""),
+                    phone=a.get("phone") or pending.get("customer_phone", "9876543210"),
                 )
             )
     else:
@@ -762,6 +858,356 @@ async def cashfree_webhook(request: Request, background_tasks: BackgroundTasks):
         mark_order_failed(order_id, reason=f"Webhook event: {event_type}")
 
     return {"status": "OK", "order_id": order_id}
+
+# -------------------------------------------------------------
+# KonfHub Official Webhook Receiver
+# -------------------------------------------------------------
+@app.post("/api/payment/konfhub/webhook")
+async def konfhub_webhook(request: Request, background_tasks: BackgroundTasks):
+    """
+    Official KonfHub Webhook receiver.
+    Receives real-time Attendee Registration events from KonfHub,
+    extracts attendee info, atomically issues the next ticket (#0135+),
+    and sends the official EchoSphere confirmation pass email.
+    """
+    raw_body_bytes = await request.body()
+    raw_body = raw_body_bytes.decode("utf-8")
+    logger.info(f"Received KonfHub webhook payload: {raw_body}")
+
+    try:
+        payload = json.loads(raw_body)
+    except Exception as e:
+        logger.error(f"Malformed KonfHub webhook JSON: {e}")
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": "Invalid JSON"})
+
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+
+    # 1. Resolve KonfHub Order / Ticket ID for tracking & idempotency
+    raw_id = (
+        data.get("order_id")
+        or data.get("ticket_id")
+        or data.get("registration_id")
+        or data.get("booking_id")
+        or payload.get("order_id")
+        or payload.get("ticket_id")
+        or f"KH_{int(time.time() * 1000)}"
+    )
+    kh_payment_id = f"KH_{str(raw_id).lstrip('KH_')}"
+
+    # 2. Check Idempotency: Prevent duplicate pass issuance
+    existing_tickets = get_tickets_by_payment_id(kh_payment_id)
+    if existing_tickets:
+        logger.info(f"KonfHub order {kh_payment_id} already confirmed ({len(existing_tickets)} tickets). Returning OK.")
+        return {"status": "OK", "message": "Already processed", "payment_id": kh_payment_id}
+
+    # 3. Extract buyer details to link with our pending_orders table
+    buyer_email = (
+        data.get("email")
+        or data.get("email_id")
+        or (data.get("buyer_details") if isinstance(data.get("buyer_details"), dict) else {}).get("email")
+        or (data.get("buyer_details") if isinstance(data.get("buyer_details"), dict) else {}).get("email_id")
+        or (data.get("registration_details") if isinstance(data.get("registration_details"), dict) else {}).get("email")
+        or payload.get("email")
+        or payload.get("email_id")
+    )
+    if buyer_email:
+        buyer_email = str(buyer_email).strip().lower()
+
+    buyer_phone = (
+        data.get("phone")
+        or data.get("phone_number")
+        or data.get("mobile")
+        or (data.get("buyer_details") if isinstance(data.get("buyer_details"), dict) else {}).get("phone")
+        or (data.get("buyer_details") if isinstance(data.get("buyer_details"), dict) else {}).get("phone_number")
+        or (data.get("registration_details") if isinstance(data.get("registration_details"), dict) else {}).get("phone")
+        or payload.get("phone")
+    )
+    if buyer_phone:
+        buyer_phone = str(buyer_phone).strip()
+
+    buyer_name = (
+        data.get("name")
+        or data.get("full_name")
+        or (data.get("buyer_details") if isinstance(data.get("buyer_details"), dict) else {}).get("name")
+        or (data.get("buyer_details") if isinstance(data.get("buyer_details"), dict) else {}).get("full_name")
+        or (data.get("registration_details") if isinstance(data.get("registration_details"), dict) else {}).get("name")
+        or payload.get("name")
+        or "EchoSphere Attendee"
+    )
+
+    attendees_to_issue = []
+
+    # Priority A: Check if this booking matches a pending order from our website form!
+    # Our website form records distinct names, emails, and phones for EACH of the 1 to 10 attendees.
+    matched_pending = None
+    if buyer_email:
+        matched_pending = get_pending_order_by_buyer(buyer_email, buyer_phone)
+
+    if matched_pending and matched_pending.get("attendees"):
+        pending_attendees = matched_pending["attendees"]
+        logger.info(
+            f"Found matching website pending order {matched_pending['order_id']} with {len(pending_attendees)} attendees for {buyer_email}"
+        )
+        for att in pending_attendees:
+            a_name = att.get("full_name") or att.get("name") or buyer_name or "EchoSphere Attendee"
+            a_email = att.get("email") or buyer_email
+            a_phone = att.get("phone") or buyer_phone or ""
+            if a_email:
+                attendees_to_issue.append({
+                    "name": str(a_name).strip(),
+                    "email": str(a_email).strip().lower(),
+                    "phone": str(a_phone).strip(),
+                })
+        # Mark pending order completed
+        mark_order_completed(matched_pending["order_id"])
+
+    # Priority B: Check if KonfHub payload included distinct attendees array
+    if not attendees_to_issue:
+        attendees_list = data.get("attendees") or payload.get("attendees")
+        if isinstance(attendees_list, list) and len(attendees_list) > 0:
+            for att in attendees_list:
+                if isinstance(att, dict):
+                    a_name = att.get("name") or att.get("full_name") or att.get("attendee_name") or buyer_name
+                    a_email = att.get("email") or att.get("email_id") or att.get("attendee_email")
+                    a_phone = att.get("phone") or att.get("phone_number") or att.get("mobile") or ""
+                    if a_email:
+                        attendees_to_issue.append({
+                            "name": str(a_name).strip(),
+                            "email": str(a_email).strip().lower(),
+                            "phone": str(a_phone).strip(),
+                        })
+
+    # Priority C: Fallback to buyer details (handling multi-ticket quantity if > 1)
+    if not attendees_to_issue and buyer_email:
+        raw_qty = (
+            data.get("ticket_quantity")
+            or data.get("quantity")
+            or data.get("no_of_tickets")
+            or payload.get("ticket_quantity")
+            or payload.get("quantity")
+            or 1
+        )
+        try:
+            qty = max(1, min(15, int(raw_qty)))
+        except Exception:
+            qty = 1
+
+        for i in range(1, qty + 1):
+            suffix = f" (Pass {i}/{qty})" if qty > 1 and i > 1 else ""
+            attendees_to_issue.append({
+                "name": f"{buyer_name}{suffix}".strip(),
+                "email": buyer_email,
+                "phone": buyer_phone or "",
+            })
+
+    if not attendees_to_issue:
+        logger.warning(f"KonfHub webhook received without identifiable attendee email: {payload}")
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"status": "ignored", "reason": "No attendee email found in payload"}
+        )
+
+    # 4. Resolve tier & price
+    tier_info = get_tier_settings("Early Bird Ticket")
+    tier_name = str(data.get("ticket_name") or payload.get("ticket_name") or "Early Bird Ticket")
+    raw_amount = float(
+        data.get("amount_paid")
+        or data.get("ticket_price")
+        or payload.get("amount_paid")
+        or tier_info.get("price", 349.0)
+    )
+    if len(attendees_to_issue) > 1 and raw_amount > 400.0:
+        amount_per_ticket = round(raw_amount / len(attendees_to_issue), 2)
+    else:
+        amount_per_ticket = float(tier_info.get("price", 349.0))
+
+    created_tickets = []
+    for attendee in attendees_to_issue:
+        ticket = create_ticket(
+            full_name=attendee["name"],
+            email=attendee["email"],
+            phone=attendee["phone"],
+            tier=tier_name,
+            amount=amount_per_ticket,
+            currency="INR",
+            payment_id=kh_payment_id,
+            secret_key=SECRET_KEY,
+        )
+        created_tickets.append(ticket)
+        logger.info(
+            f"Booked KonfHub pass #{ticket['ticket_number']} for {ticket['email']} (Payment: {kh_payment_id})"
+        )
+
+        # Dispatch official confirmation email with pass
+        background_tasks.add_task(
+            send_ticket_confirmation_email,
+            to_email=ticket["email"],
+            recipient_name=ticket["full_name"],
+            ticket_number=ticket["ticket_number"],
+            tier=ticket["tier"],
+            amount=ticket["amount"],
+            security_hash=ticket["security_hash"],
+            created_at=ticket["created_at"],
+            phone=ticket.get("phone", ""),
+        )
+
+    return {
+        "status": "success",
+        "message": f"Successfully issued {len(created_tickets)} pass(es)",
+        "payment_id": kh_payment_id,
+        "tickets": [t["ticket_number"] for t in created_tickets],
+    }
+
+@app.get("/api/admin/pending-orders")
+def admin_get_pending_orders(auth_token: Optional[str] = Header(None)):
+    validate_admin_session(auth_token)
+    return {"status": "ok", "orders": get_all_pending_orders(limit=150)}
+
+@app.post("/api/admin/fulfill-pending-order/{order_id}")
+def admin_fulfill_pending_order(
+    order_id: str,
+    background_tasks: BackgroundTasks,
+    auth_token: Optional[str] = Header(None)
+):
+    validate_admin_session(auth_token)
+    order = get_pending_order(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+        
+    attendees = order.get("attendees") or []
+    if not attendees:
+        raise HTTPException(status_code=400, detail="No attendees found in this order")
+        
+    created = []
+    tier_info = get_tier_settings(order.get("tier", "Early Bird Ticket"))
+    tier_name = order.get("tier", "Early Bird Ticket")
+    total_amount = float(order.get("amount") or 349.0)
+    amount_per_ticket = round(total_amount / len(attendees), 2) if len(attendees) > 0 else float(tier_info.get("price", 349.0))
+    
+    for att in attendees:
+        ticket = create_ticket(
+            full_name=att.get("full_name") or order.get("customer_name"),
+            email=att.get("email") or order.get("customer_email"),
+            phone=att.get("phone") or order.get("customer_phone"),
+            tier=tier_name,
+            amount=amount_per_ticket,
+            currency="INR",
+            payment_id=order_id,
+            secret_key=SECRET_KEY,
+        )
+        created.append(ticket)
+        background_tasks.add_task(
+            send_ticket_confirmation_email,
+            to_email=ticket["email"],
+            recipient_name=ticket["full_name"],
+            ticket_number=ticket["ticket_number"],
+            tier=ticket["tier"],
+            amount=ticket["amount"],
+            security_hash=ticket["security_hash"],
+            created_at=ticket["created_at"],
+            phone=ticket.get("phone", ""),
+        )
+        
+    mark_order_completed(order_id)
+    return {
+        "status": "ok",
+        "message": f"Successfully fulfilled {len(created)} tickets for order {order_id}",
+        "tickets": created,
+    }
+
+# -------------------------------------------------------------
+# Cashfree Order Reconciliation Engine & Background Worker
+# -------------------------------------------------------------
+def run_reconciliation(background_tasks: Optional[BackgroundTasks] = None) -> Dict[str, Any]:
+    """
+    Automated Cashfree Reconciliation Engine:
+    Inspects all unfulfilled pending orders, verifies each against Cashfree API,
+    and automatically issues tickets and confirmation emails for any paid orders.
+    """
+    if not is_cashfree_configured():
+        return {
+            "success": False,
+            "message": "Cashfree is not configured. Reconciliation skipped.",
+            "reconciled_count": 0,
+        }
+
+    unfulfilled = get_unfulfilled_pending_orders()
+    reconciled_orders = []
+    failed_orders = []
+    already_valid = []
+    errors = []
+
+    if unfulfilled:
+        logger.info(f"[Reconciliation] Checking {len(unfulfilled)} unfulfilled pending orders against Cashfree.")
+
+    for po in unfulfilled:
+        order_id = po["order_id"]
+        # Skip KonfHub orders from Cashfree API verification
+        if order_id.startswith("KH_"):
+            continue
+
+        # Double-check idempotency in case tickets were just issued
+        existing = get_tickets_by_payment_id(order_id)
+        if existing:
+            mark_order_completed(order_id)
+            already_valid.append(order_id)
+            continue
+
+        try:
+            cf_order = verify_cashfree_order(order_id)
+            cf_status = str(cf_order.get("order_status", "")).upper()
+
+            is_paid = cf_status in ("PAID", "SUCCESS")
+            if not is_paid:
+                try:
+                    payments = get_order_payments(order_id)
+                    is_paid = any(str(p.get("payment_status", "")).upper() == "SUCCESS" for p in payments)
+                except Exception:
+                    is_paid = False
+
+            if is_paid:
+                logger.info(
+                    f"[Reconciliation] Found PAID order {order_id} ({po.get('customer_name')}, {po.get('customer_email')}). Fulfilling pass..."
+                )
+                res = fulfill_booking(order_id=order_id, background_tasks=background_tasks)
+                reconciled_orders.append({
+                    "order_id": order_id,
+                    "customer_name": po.get("customer_name"),
+                    "customer_email": po.get("customer_email"),
+                    "amount": po.get("amount"),
+                    "tickets": [t["ticket_number"] for t in res.get("tickets", [])],
+                })
+            elif cf_status in ("FAILED", "USER_DROPPED", "CANCELLED", "EXPIRED"):
+                mark_order_failed(order_id, reason=f"Cashfree status: {cf_status}")
+                failed_orders.append(order_id)
+        except Exception as e:
+            logger.error(f"[Reconciliation] Error verifying order {order_id}: {e}")
+            errors.append({"order_id": order_id, "error": str(e)})
+
+    stats = get_ticket_stats()
+    return {
+        "success": True,
+        "total_unfulfilled_checked": len(unfulfilled),
+        "reconciled_count": len(reconciled_orders),
+        "reconciled_orders": reconciled_orders,
+        "marked_failed_count": len(failed_orders),
+        "errors": errors,
+        "updated_stats": stats,
+    }
+
+@app.on_event("startup")
+async def start_periodic_reconciler():
+    """Starts background periodic reconciliation task running every 60s."""
+    async def periodic_worker():
+        await asyncio.sleep(6)  # Give server 6s to boot up cleanly
+        while True:
+            try:
+                await asyncio.to_thread(run_reconciliation)
+            except Exception as ex:
+                logger.error(f"[Background Reconciler Worker] Exception: {ex}")
+            await asyncio.sleep(60)
+
+    asyncio.create_task(periodic_worker())
 
 @app.get("/api/tickets/verify/{ticket_number}")
 def verify_ticket(ticket_number: str):
@@ -1076,4 +1522,17 @@ def admin_update_tier_settings(
         "message": f"Pricing updated: ₹{updated['price']} (scratched: ₹{updated['original_price']}), {updated['claimed_count']}/{updated['total_count']} booked.",
         "settings": updated,
     }
+
+@app.post("/api/admin/reconcile-orders")
+def admin_reconcile_orders(
+    background_tasks: BackgroundTasks,
+    admin_token: str = Depends(require_admin),
+):
+    """
+    On-demand reconciliation button in Gate Command Center:
+    Pulls latest payment statuses from Cashfree and issues any missing tickets.
+    """
+    res = run_reconciliation(background_tasks=background_tasks)
+    return res
+
 

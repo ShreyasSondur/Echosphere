@@ -81,6 +81,17 @@ def create_cashfree_order(
     if is_prod and target_return_url.startswith("http://"):
         target_return_url = "https://" + target_return_url[7:]
 
+    notify_url = os.getenv(
+        "CASHFREE_NOTIFY_URL",
+        "https://echosphere.suiet.website/api/payment/cashfree/webhook" if is_prod else ""
+    ).strip()
+
+    order_meta: Dict[str, Any] = {
+        "return_url": target_return_url,
+    }
+    if notify_url:
+        order_meta["notify_url"] = notify_url
+
     payload = {
         "order_id": order_id,
         "order_amount": round(amount, 2),
@@ -91,9 +102,7 @@ def create_cashfree_order(
             "customer_email": customer_email.strip().lower(),
             "customer_phone": clean_phone,
         },
-        "order_meta": {
-            "return_url": target_return_url,
-        },
+        "order_meta": order_meta,
         "order_note": "EchoSphere 2026 Concert Pass - Najran Kabeer × Benjamin Solomon Live",
         "order_tags": {
             "brand": "EchoSphere",

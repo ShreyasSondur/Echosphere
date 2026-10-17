@@ -124,6 +124,7 @@ export default function AdminGatePage() {
     badge_text: "Early Bird Ticket",
   });
   const [isSavingTier, setIsSavingTier] = useState(false);
+  const [isReconciling, setIsReconciling] = useState(false);
 
   const otpInputRef = useRef<HTMLInputElement>(null);
 
@@ -587,6 +588,46 @@ export default function AdminGatePage() {
     }
   };
 
+  // Reconcile and recover missing Cashfree orders
+  const handleReconcileOrders = async () => {
+    if (!adminToken) return;
+    setIsReconciling(true);
+    try {
+      const effectiveApiUrl = getApiUrl();
+      const res = await fetch(`${effectiveApiUrl}/api/admin/reconcile-orders`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Reconciliation failed.");
+      }
+
+      if (data.reconciled_count > 0) {
+        addToast(
+          `🎉 Reconciled ${data.reconciled_count} paid order(s)! Passes generated and confirmation emails sent.`,
+          "success"
+        );
+      } else {
+        addToast(
+          `✓ All ${data.total_unfulfilled_checked || 0} pending orders are already in sync with Cashfree.`,
+          "info"
+        );
+      }
+      // Refresh dashboard list immediately
+      void fetchDashboardData(adminToken);
+    } catch (err: unknown) {
+      addToast(
+        err instanceof Error ? err.message : "Error syncing with Cashfree.",
+        "error"
+      );
+    } finally {
+      setIsReconciling(false);
+    }
+  };
+
   // Export Roster to CSV
   const handleExportCSV = () => {
     if (!tickets.length) {
@@ -874,6 +915,17 @@ export default function AdminGatePage() {
 
               <button
                 type="button"
+                onClick={handleReconcileOrders}
+                disabled={isReconciling}
+                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
+                title="Cross-check all pending orders directly against Cashfree API and recover missing passes"
+              >
+                <span>{isReconciling ? "⏳" : "⚡"}</span>
+                <span>{isReconciling ? "Syncing..." : "Sync Cashfree"}</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => adminToken && void fetchDashboardData(adminToken)}
                 disabled={isRefreshing}
                 className="px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 font-medium text-xs border border-slate-700/60 transition"
@@ -907,7 +959,7 @@ export default function AdminGatePage() {
                       Save ₹{currentTierSettings.savings}
                     </span>
                     <span className="text-[10px] font-mono text-purple-300 bg-purple-900/40 px-2 py-0.5 rounded border border-purple-700/50">
-                      Cashfree Production Live
+                      KonfHub Live Gateway
                     </span>
                   </div>
                   <div className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">

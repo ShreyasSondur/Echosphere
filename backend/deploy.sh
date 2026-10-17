@@ -53,6 +53,11 @@ if ! grep -q "ADMIN_EMAIL=shreyas.u.sondur@gmail.com" .env; then
     sed -i 's/^ADMIN_EMAIL=.*/ADMIN_EMAIL=shreyas.u.sondur@gmail.com/' .env || echo "ADMIN_EMAIL=shreyas.u.sondur@gmail.com" >> .env
 fi
 
+# Explicitly guarantee KONFHUB_EVENT_URL is set
+if ! grep -q "KONFHUB_EVENT_URL" .env; then
+    echo "KONFHUB_EVENT_URL=https://konfhub.com/echosphere-20" >> .env
+fi
+
 chmod 600 .env
 echo -e "${GREEN}✓ .env active and verified:${NC} ADMIN_EMAIL=shreyas.u.sondur@gmail.com | PORT=8002"
 
