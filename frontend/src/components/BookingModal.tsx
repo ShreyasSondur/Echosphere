@@ -31,6 +31,18 @@ export interface PaymentFailureInfo {
   detail?: string;
 }
 
+export interface TierSettings {
+  tier_name: string;
+  price: number;
+  original_price: number;
+  claimed_count: number;
+  total_count: number;
+  spots_left: number;
+  badge_text: string;
+  savings: number;
+  updated_at?: string;
+}
+
 interface BookingModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -44,15 +56,15 @@ interface BookingModalProps {
 
 // Official Dynamic KonfHub Widget URL with full multi-ticket quantity selection (1 to 10 passes)
 // and per-ticket individual attendee details!
-const KONFHUB_WIDGET_URL = "https://konfhub.com/widget/echosphere-20";
-const KONFHUB_EVENT_URL = "https://konfhub.com/echosphere-20";
+const KONFHUB_WIDGET_URL = "https://konfhub.com/widget/id/b5de0467-25df-4c55-bb52-0e797b5dc02c";
+const KONFHUB_EVENT_URL = "https://konfhub.com/widget/id/b5de0467-25df-4c55-bb52-0e797b5dc02c";
 
 export default function BookingModal({
   isOpen,
   onClose,
   stats: _stats,
   onSuccess: _onSuccess,
-  apiUrl: _apiUrl,
+  apiUrl,
   confirmedTicketsList,
   paymentFailure,
   onRetryPayment,
@@ -60,6 +72,39 @@ export default function BookingModal({
   const [isIframeLoaded, setIsIframeLoaded] = useState(false);
   const [confirmedTickets, setConfirmedTickets] = useState<ConfirmedTicket[]>([]);
   const [activeTicketView, setActiveTicketView] = useState<number>(0);
+  const [tierSettings, setTierSettings] = useState<TierSettings | null>(null);
+
+  // Live fetch Tier Settings (Pricing, Claimed / Total Count, Spots Left) from backend
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let isMounted = true;
+    const effectiveUrl = (apiUrl || "").replace(/\/$/, "");
+
+    const fetchSettings = async () => {
+      try {
+        const res = await fetch(`${effectiveUrl}/api/tickets/tier-settings`, {
+          cache: "no-store",
+        });
+        if (res.ok && isMounted) {
+          const data: TierSettings = await res.json();
+          setTierSettings(data);
+        }
+      } catch {
+        // Fallback gracefully
+      }
+    };
+
+    void fetchSettings();
+    const interval = setInterval(() => {
+      void fetchSettings();
+    }, 5000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [isOpen, apiUrl]);
 
   // Sync if confirmed tickets are passed in
   useEffect(() => {
@@ -345,25 +390,76 @@ export default function BookingModal({
             /* ========================================================= */
             <div className="space-y-3">
               
-              {/* Event & Pricing Quick Info Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 rounded-xl bg-white/[0.03] border border-white/[0.08] text-xs">
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-white">Early Bird Pass</span>
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[11px] font-bold">
-                    ₹349 each
-                  </span>
-                  <span className="text-slate-400 hidden xs:inline">• Arena Access</span>
+              {/* Live Connected Scarcity & Dynamic Pricing Bar */}
+              <div className="rounded-xl bg-gradient-to-r from-purple-950/40 via-indigo-950/30 to-slate-900/60 border border-indigo-500/25 p-3 sm:p-3.5 space-y-2.5 shadow-lg shadow-purple-950/20">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-bold text-white text-xs sm:text-sm tracking-tight flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                      {tierSettings?.badge_text || "Early Bird Pass"}
+                    </span>
+                    
+                    {/* Live Scarcity Counter Badge (Connected to Admin / Backend) */}
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 font-mono text-[11px] font-bold">
+                      <span>🔥</span>
+                      <span>
+                        {tierSettings
+                          ? `${tierSettings.claimed_count}/${tierSettings.total_count} Booked`
+                          : "181/200 Booked"}
+                      </span>
+                    </span>
+
+                    {/* Spots left pill */}
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[10px] font-bold uppercase tracking-wider animate-pulse">
+                      Only {tierSettings?.spots_left ?? 19} spots left!
+                    </span>
+                  </div>
+
+                  {/* Price & Original Strikethrough */}
+                  <div className="flex items-center gap-2 text-xs">
+                    {tierSettings?.original_price && tierSettings.original_price > (tierSettings.price || 349) && (
+                      <span className="text-slate-400 line-through text-[11px]">
+                        ₹{tierSettings.original_price}
+                      </span>
+                    )}
+                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-bold font-mono text-xs">
+                      ₹{tierSettings?.price ?? 349} each
+                    </span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                  <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                  </svg>
-                  <span>Select 1 to 10 passes below • Instant QR Pass per Attendee</span>
+
+                {/* Demand Progress Bar */}
+                <div className="space-y-1">
+                  <div className="w-full h-1.5 rounded-full bg-slate-800/80 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-purple-500 to-amber-400 transition-all duration-700"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          Math.max(
+                            5,
+                            tierSettings
+                              ? (tierSettings.claimed_count / (tierSettings.total_count || 200)) * 100
+                              : 90.5
+                          )
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium">
+                    <span className="flex items-center gap-1 text-slate-300">
+                      <span>⚡</span>
+                      <span>Select 1 to 10 passes below • Instant QR Pass per Attendee</span>
+                    </span>
+                    <span className="font-mono text-amber-300/90 font-semibold">
+                      {tierSettings?.spots_left ?? 19} passes remaining
+                    </span>
+                  </div>
                 </div>
               </div>
 
               {/* Dynamic KonfHub Widget Iframe: Supports multi-ticket selection & per-ticket details */}
-              <div className="relative w-full rounded-xl overflow-hidden bg-white shadow-[0_4px_25px_rgba(0,0,0,0.5)] min-h-[560px]">
+              <div className="relative w-full rounded-xl overflow-hidden bg-white shadow-[0_4px_25px_rgba(0,0,0,0.5)] min-h-[500px]">
                 {!isIframeLoaded && (
                   <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-[#090b17] text-center p-6 space-y-3">
                     <div className="w-10 h-10 border-3 border-indigo-500 border-t-transparent rounded-full animate-spin" />
@@ -379,16 +475,16 @@ export default function BookingModal({
                 )}
 
                 <iframe
-                  src={KONFHUB_WIDGET_URL}
+                  src="https://konfhub.com/widget/id/b5de0467-25df-4c55-bb52-0e797b5dc02c"
                   id="konfhub-widget"
                   title="Register for EchoSphere 2.0"
                   width="100%"
-                  height="580"
-                  allow="payment; camera; microphone; clipboard-write; fullscreen"
+                  height="500"
+                  allow="payment"
                   className="w-full border-0 block"
                   style={{
-                    minHeight: "560px",
-                    height: "580px",
+                    minHeight: "500px",
+                    height: "500px",
                     background: "#ffffff",
                     border: "none",
                   }}

@@ -7,10 +7,12 @@ import asyncio
 import logging
 import secrets
 from typing import Optional, Dict
+import io
+import csv
 from collections import defaultdict
-from fastapi import FastAPI, HTTPException, Request, Response, BackgroundTasks, Depends, status, Header
+from fastapi import FastAPI, HTTPException, Request, Response, BackgroundTasks, Depends, status, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
@@ -40,6 +42,7 @@ from database import (
     checkin_ticket,
     undo_checkin_ticket,
     create_manual_ticket,
+    create_bulk_tickets,
     save_admin_otp,
     verify_admin_otp,
     validate_admin_session,
@@ -1251,6 +1254,20 @@ class AdminManualTicketRequest(BaseModel):
     send_email: Optional[bool] = True
     admit_now: Optional[bool] = False
 
+class BulkAttendeeItem(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=100)
+    email: str = Field(...)
+    phone: str = Field(...)
+    tier: Optional[str] = None
+    amount: Optional[float] = None
+
+class AdminBulkCreateTicketRequest(BaseModel):
+    attendees: list[BulkAttendeeItem]
+    tier: Optional[str] = "Spot Entry Pass"
+    amount: Optional[float] = 349.0
+    send_email: Optional[bool] = True
+    admit_now: Optional[bool] = False
+
 def require_admin(request: Request) -> str:
     auth = request.headers.get("Authorization", "")
     token = ""
@@ -1435,6 +1452,416 @@ def admin_create_ticket(
         "message": msg,
         "ticket": ticket,
         "email_sent": email_sent_immediately,
+    }
+
+# -------------------------------------------------------------
+# Bulk Attendees Import & Template Endpoints (Excel / CSV)
+# -------------------------------------------------------------
+def background_bulk_email_task(tickets: list[Dict[str, Any]]):
+    """
+    Delivers official concert entry passes to a list of attendees sequentially with gentle pacing.
+    Updates email_sent flag in SQLite upon successful SMTP delivery.
+    """
+    total = len(tickets)
+    logger.info(f"[Bulk Email Worker] Initiating dispatch for {total} concert passes...")
+    success_count = 0
+    for idx, t in enumerate(tickets):
+        try:
+            sent = send_ticket_confirmation_email(
+                to_email=t["email"],
+                recipient_name=t["full_name"],
+                ticket_number=t["ticket_number"],
+                tier=t["tier"],
+                amount=t["amount"],
+                security_hash=t["security_hash"],
+                created_at=t["created_at"],
+                phone=t.get("phone", ""),
+            )
+            if sent:
+                mark_email_sent(t["ticket_number"])
+                success_count += 1
+                logger.info(f"[Bulk Email Worker] ({idx+1}/{total}) Pass #{t['ticket_number']} emailed to {t['email']}")
+            else:
+                logger.warning(f"[Bulk Email Worker] ({idx+1}/{total}) Email delivery failed for #{t['ticket_number']} ({t['email']})")
+        except Exception as ex:
+            logger.error(f"[Bulk Email Worker] Error sending pass #{t['ticket_number']} to {t.get('email')}: {ex}")
+        
+        # Gentle pacing to avoid SMTP rate throttling
+        if idx < total - 1:
+            time.sleep(0.3)
+
+    logger.info(f"[Bulk Email Worker] Finished dispatching: {success_count}/{total} passes sent.")
+
+
+def generate_excel_template() -> io.BytesIO:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "EchoSphere Attendees"
+
+    headers = ["Full Name", "Email Address", "Phone Number", "Tier (Optional)", "Amount (Optional)"]
+    ws.append(headers)
+
+    # Style header row
+    header_fill = PatternFill(start_color="1E1B4B", end_color="1E1B4B", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    thin_border = Border(
+        left=Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"),
+        bottom=Side(style="thin", color="CCCCCC"),
+    )
+
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+
+    # Sample rows
+    sample_data = [
+        ["Rahul Sharma", "rahul.sharma@example.com", "9876543210", "Spot Entry Pass", 349],
+        ["Ananya Rao", "ananya.rao@example.com", "9845123456", "Spot Entry Pass", 349],
+        ["Mohammed Farhan", "m.farhan@example.com", "9741234567", "Spot Entry Pass", 349],
+    ]
+
+    sample_font = Font(name="Calibri", size=10)
+    for row_idx, row_data in enumerate(sample_data, start=2):
+        ws.append(row_data)
+        for col_idx in range(1, len(row_data) + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.font = sample_font
+            cell.border = thin_border
+            if col_idx in (3, 5):
+                cell.alignment = Alignment(horizontal="center")
+
+    col_widths = {1: 26, 2: 32, 3: 18, 4: 22, 5: 18}
+    for col_idx, width in col_widths.items():
+        col_letter = openpyxl.utils.get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = width
+
+    ws.row_dimensions[1].height = 26
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+
+def generate_csv_template() -> str:
+    return (
+        "Full Name,Email Address,Phone Number,Tier (Optional),Amount (Optional)\n"
+        "Rahul Sharma,rahul.sharma@example.com,9876543210,Spot Entry Pass,349\n"
+        "Ananya Rao,ananya.rao@example.com,9845123456,Spot Entry Pass,349\n"
+        "Mohammed Farhan,m.farhan@example.com,9741234567,Spot Entry Pass,349\n"
+    )
+
+
+def parse_attendees_from_file(file_bytes: bytes, filename: str) -> list[Dict[str, Any]]:
+    lower_name = filename.lower()
+    raw_rows: list[list[Any]] = []
+
+    if lower_name.endswith(".xlsx") or lower_name.endswith(".xls"):
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        ws = wb.active
+        for row in ws.iter_rows(values_only=True):
+            if any(cell is not None and str(cell).strip() != "" for cell in row):
+                raw_rows.append(list(row))
+    else:
+        text_content = ""
+        for encoding in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+            try:
+                text_content = file_bytes.decode(encoding)
+                break
+            except Exception:
+                continue
+        if not text_content:
+            raise ValueError("Unable to read file encoding. Please ensure file is UTF-8 or standard CSV.")
+        
+        lines = [l for l in text_content.splitlines() if l.strip()]
+        if not lines:
+            return []
+        
+        delimiter = ","
+        first_line = lines[0]
+        if "\t" in first_line and first_line.count("\t") > first_line.count(","):
+            delimiter = "\t"
+        elif ";" in first_line and first_line.count(";") > first_line.count(","):
+            delimiter = ";"
+
+        reader = csv.reader(io.StringIO(text_content), delimiter=delimiter)
+        for r in reader:
+            if any(cell.strip() != "" for cell in r):
+                raw_rows.append(r)
+
+    if not raw_rows:
+        return []
+
+    # Detect header row
+    header_idx = -1
+    col_map = {"name": -1, "email": -1, "phone": -1, "tier": -1, "amount": -1}
+
+    for idx, row in enumerate(raw_rows[:5]):
+        str_cells = [str(c or "").strip().lower() for c in row]
+        has_name = any(k in c for c in str_cells for k in ("name", "attendee", "participant", "student"))
+        has_email = any(k in c for c in str_cells for k in ("email", "mail"))
+        has_phone = any(k in c for c in str_cells for k in ("phone", "mobile", "contact", "cell"))
+        
+        if (has_name and has_email) or (has_email and has_phone) or (has_name and has_phone):
+            header_idx = idx
+            for c_idx, cell_str in enumerate(str_cells):
+                if any(k in cell_str for k in ("full name", "fullname", "name", "attendee", "participant")) and col_map["name"] == -1:
+                    col_map["name"] = c_idx
+                elif any(k in cell_str for k in ("email", "mail", "e-mail")) and col_map["email"] == -1:
+                    col_map["email"] = c_idx
+                elif any(k in cell_str for k in ("phone", "mobile", "contact", "cell", "whatsapp")) and col_map["phone"] == -1:
+                    col_map["phone"] = c_idx
+                elif any(k in cell_str for k in ("tier", "ticket type", "pass", "category")) and col_map["tier"] == -1:
+                    col_map["tier"] = c_idx
+                elif any(k in cell_str for k in ("amount", "price", "fee", "cost", "paid")) and col_map["amount"] == -1:
+                    col_map["amount"] = c_idx
+            break
+
+    data_start = header_idx + 1 if header_idx != -1 else 0
+
+    if col_map["name"] == -1 or col_map["email"] == -1:
+        col_map["name"] = 0
+        col_map["email"] = 1
+        col_map["phone"] = 2
+        col_map["tier"] = 3
+        col_map["amount"] = 4
+
+    attendees = []
+    for row in raw_rows[data_start:]:
+        def get_val(col_key: str):
+            idx = col_map.get(col_key, -1)
+            if 0 <= idx < len(row) and row[idx] is not None:
+                return row[idx]
+            return None
+
+        raw_name = get_val("name")
+        raw_email = get_val("email")
+        raw_phone = get_val("phone")
+        raw_tier = get_val("tier")
+        raw_amt = get_val("amount")
+
+        name = str(raw_name or "").strip()
+        email = str(raw_email or "").strip().lower()
+        
+        phone = ""
+        if raw_phone is not None:
+            if isinstance(raw_phone, float):
+                raw_phone = int(raw_phone)
+            phone_str = str(raw_phone).strip()
+            if phone_str.endswith(".0"):
+                phone_str = phone_str[:-2]
+            digits = "".join(filter(str.isdigit, phone_str))
+            if digits.startswith("91") and len(digits) == 12:
+                digits = digits[2:]
+            elif digits.startswith("0") and len(digits) == 11:
+                digits = digits[1:]
+            phone = digits
+
+        if not name or not email or "@" not in email:
+            continue
+
+        item: Dict[str, Any] = {
+            "full_name": name,
+            "email": email,
+            "phone": phone or "9876543210",
+        }
+        if raw_tier and str(raw_tier).strip():
+            item["tier"] = str(raw_tier).strip()
+        if raw_amt is not None and str(raw_amt).strip():
+            try:
+                item["amount"] = float(raw_amt)
+            except Exception:
+                pass
+
+        attendees.append(item)
+
+    return attendees
+
+
+@app.get("/api/admin/tickets/template")
+def admin_download_template(
+    format: str = "xlsx",
+    admin_token: str = Depends(require_admin),
+):
+    """
+    Downloads the official Excel (.xlsx) or CSV (.csv) template for bulk attendee uploads.
+    """
+    fmt = format.strip().lower()
+    if fmt == "csv":
+        csv_str = generate_csv_template()
+        return Response(
+            content=csv_str,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=echosphere_attendees_template.csv"},
+        )
+    
+    excel_buf = generate_excel_template()
+    return StreamingResponse(
+        excel_buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=echosphere_attendees_template.xlsx"},
+    )
+
+
+@app.post("/api/admin/tickets/bulk-create")
+def admin_bulk_create_tickets(
+    payload: AdminBulkCreateTicketRequest,
+    background_tasks: BackgroundTasks,
+    admin_token: str = Depends(require_admin),
+):
+    """
+    Bulk creates concert tickets atomically from structured attendee list.
+    Assigns sequential 4-digit ticket numbers (0001 to 2000), SHA-256 security hashes,
+    and dispatches confirmation emails immediately via background tasks.
+    """
+    if not payload.attendees:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No attendee records provided.",
+        )
+
+    stats = get_ticket_stats()
+    needed = len(payload.attendees)
+    if stats["available_tickets"] < needed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Requested {needed} passes, but only {stats['available_tickets']} slots remain (Max limit: 2000).",
+        )
+
+    attendee_dicts = []
+    for a in payload.attendees:
+        clean_name = a.full_name.strip()
+        clean_email = a.email.strip().lower()
+        clean_phone = "".join(filter(str.isdigit, a.phone.strip()))
+        if clean_phone.startswith("91") and len(clean_phone) == 12:
+            clean_phone = clean_phone[2:]
+        elif clean_phone.startswith("0") and len(clean_phone) == 11:
+            clean_phone = clean_phone[1:]
+        
+        attendee_dicts.append({
+            "full_name": clean_name,
+            "email": clean_email,
+            "phone": clean_phone or "9876543210",
+            "tier": (a.tier or payload.tier or "Spot Entry Pass").strip(),
+            "amount": a.amount if a.amount is not None else (payload.amount if payload.amount is not None else 349.0),
+        })
+
+    try:
+        created_tickets = create_bulk_tickets(
+            attendees=attendee_dicts,
+            secret_key=SECRET_KEY,
+            default_tier=payload.tier or "Spot Entry Pass",
+            default_amount=payload.amount or 349.0,
+            payment_method="Bulk Import / Excel",
+            admit_now=bool(payload.admit_now),
+        )
+    except Exception as e:
+        logger.error(f"Error during create_bulk_tickets: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    if payload.send_email and created_tickets:
+        background_tasks.add_task(background_bulk_email_task, created_tickets)
+
+    first_num = created_tickets[0]["ticket_number"] if created_tickets else "----"
+    last_num = created_tickets[-1]["ticket_number"] if created_tickets else "----"
+
+    msg = f"Successfully generated {len(created_tickets)} passes (#{first_num} – #{last_num})."
+    if payload.send_email:
+        msg += " Confirmation pass emails are being dispatched immediately."
+
+    return {
+        "success": True,
+        "message": msg,
+        "count": len(created_tickets),
+        "first_ticket": first_num,
+        "last_ticket": last_num,
+        "tickets": created_tickets,
+        "stats": get_ticket_stats(),
+    }
+
+
+@app.post("/api/admin/tickets/bulk-upload")
+async def admin_bulk_upload_file(
+    file: UploadFile = File(...),
+    tier: str = Form("Spot Entry Pass"),
+    amount: float = Form(349.0),
+    send_email: bool = Form(True),
+    admit_now: bool = Form(False),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    admin_token: str = Depends(require_admin),
+):
+    """
+    Direct Excel (.xlsx, .xls) or CSV file upload endpoint.
+    Parses file, verifies columns, atomically generates passes, and dispatches confirmation emails.
+    """
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+
+    try:
+        attendees = parse_attendees_from_file(contents, file.filename or "file.xlsx")
+    except Exception as e:
+        logger.error(f"Failed to parse uploaded sheet {file.filename}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unable to parse Excel/CSV sheet: {str(e)}. Please check format or download the sample template.",
+        )
+
+    if not attendees:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No valid attendee rows detected in file. Ensure headers: Full Name, Email, Phone Number.",
+        )
+
+    stats = get_ticket_stats()
+    needed = len(attendees)
+    if stats["available_tickets"] < needed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Found {needed} attendees in file, but only {stats['available_tickets']} slots remain (Max limit: 2000).",
+        )
+
+    try:
+        created_tickets = create_bulk_tickets(
+            attendees=attendees,
+            secret_key=SECRET_KEY,
+            default_tier=tier or "Spot Entry Pass",
+            default_amount=amount or 349.0,
+            payment_method=f"Bulk File Upload ({file.filename})",
+            admit_now=bool(admit_now),
+        )
+    except Exception as e:
+        logger.error(f"Error during bulk tickets creation from file {file.filename}: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    if send_email and created_tickets:
+        background_tasks.add_task(background_bulk_email_task, created_tickets)
+
+    first_num = created_tickets[0]["ticket_number"] if created_tickets else "----"
+    last_num = created_tickets[-1]["ticket_number"] if created_tickets else "----"
+
+    msg = f"Successfully imported {len(created_tickets)} passes (#{first_num} – #{last_num}) from {file.filename}."
+    if send_email:
+        msg += " Confirmation pass emails are being dispatched immediately."
+
+    return {
+        "success": True,
+        "message": msg,
+        "filename": file.filename,
+        "count": len(created_tickets),
+        "first_ticket": first_num,
+        "last_ticket": last_num,
+        "tickets": created_tickets,
+        "stats": get_ticket_stats(),
     }
 
 @app.post("/api/admin/tickets/{ticket_number}/resend-email")

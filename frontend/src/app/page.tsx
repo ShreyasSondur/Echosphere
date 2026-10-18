@@ -34,6 +34,16 @@ export default function Home() {
   const [isVerifyingOrder, setIsVerifyingOrder] = useState(false);
   const [isBookingOpen, setIsBookingOpen] = useState(false);
   const [stats, setStats] = useState<TicketStats | null>(null);
+  const [tierSettings, setTierSettings] = useState<{
+    tier_name: string;
+    price: number;
+    original_price: number;
+    claimed_count: number;
+    total_count: number;
+    spots_left: number;
+    badge_text: string;
+    savings: number;
+  } | null>(null);
   const [confirmedTickets, setConfirmedTickets] = useState<ConfirmedTicket[]>([]);
   const [paymentFailure, setPaymentFailure] = useState<PaymentFailureInfo | null>(null);
 
@@ -179,10 +189,17 @@ export default function Home() {
     let isMounted = true;
     const load = async () => {
       try {
-        const res = await fetch(`${apiUrl}/api/tickets/stats`, { cache: "no-store" });
-        if (res.ok && isMounted) {
-          const data = await res.json();
+        const [statsRes, tierRes] = await Promise.all([
+          fetch(`${apiUrl}/api/tickets/stats`, { cache: "no-store" }),
+          fetch(`${apiUrl}/api/tickets/tier-settings`, { cache: "no-store" }),
+        ]);
+        if (statsRes.ok && isMounted) {
+          const data = await statsRes.json();
           setStats(data);
+        }
+        if (tierRes.ok && isMounted) {
+          const tierData = await tierRes.json();
+          setTierSettings(tierData);
         }
       } catch {
         // Graceful fallback
@@ -494,8 +511,32 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Live Early Bird Scarcity Badge (Connected to Admin / Backend) */}
+          <div className="pt-1 flex justify-center">
+            <button
+              type="button"
+              onClick={() => {
+                setPaymentFailure(null);
+                setConfirmedTickets([]);
+                setIsBookingOpen(true);
+              }}
+              className="cursor-pointer group inline-flex items-center gap-2 px-3.5 sm:px-4 py-1.5 rounded-full bg-slate-900/85 hover:bg-slate-900 border border-purple-500/35 hover:border-purple-400/60 backdrop-blur-md shadow-lg text-[10px] sm:text-xs transition-all duration-300"
+            >
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              <span className="font-bold text-white">
+                {tierSettings?.badge_text || "Early Bird Pass"}
+              </span>
+              <span className="text-purple-300 font-mono font-semibold">
+                • {tierSettings ? `${tierSettings.claimed_count}/${tierSettings.total_count} Booked` : "181/200 Booked"}
+              </span>
+              <span className="px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider animate-pulse">
+                Only {tierSettings?.spots_left ?? 19} spots left!
+              </span>
+            </button>
+          </div>
+
           {/* Clean "BOOK NOW" Button */}
-          <div className="pt-1 sm:pt-2 w-full flex justify-center">
+          <div className="pt-0.5 sm:pt-1 w-full flex justify-center">
             <button
               onClick={() => {
                 setPaymentFailure(null);

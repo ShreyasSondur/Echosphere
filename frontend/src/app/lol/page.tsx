@@ -2,6 +2,17 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import confetti from "canvas-confetti";
+import * as XLSX from "xlsx";
+
+interface ParsedAttendee {
+  fullName: string;
+  email: string;
+  phone: string;
+  tier?: string;
+  amount?: number;
+  isValid: boolean;
+  validationError?: string;
+}
 
 interface TicketItem {
   id: number;
@@ -125,6 +136,26 @@ export default function AdminGatePage() {
   });
   const [isSavingTier, setIsSavingTier] = useState(false);
   const [isReconciling, setIsReconciling] = useState(false);
+
+  // Bulk Upload (Excel / CSV) modal state
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
+  const [bulkStep, setBulkStep] = useState<"upload" | "preview" | "importing" | "success">("upload");
+  const [parsedAttendees, setParsedAttendees] = useState<ParsedAttendee[]>([]);
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
+  const [selectedFileSize, setSelectedFileSize] = useState<string | null>(null);
+  const [bulkTier, setBulkTier] = useState("Spot Entry Pass");
+  const [bulkAmount, setBulkAmount] = useState("349");
+  const [bulkSendEmail, setBulkSendEmail] = useState(true);
+  const [bulkAdmitNow, setBulkAdmitNow] = useState(false);
+  const [isSubmittingBulk, setIsSubmittingBulk] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [bulkSuccessResult, setBulkSuccessResult] = useState<{
+    count: number;
+    firstTicket: string;
+    lastTicket: string;
+    message: string;
+  } | null>(null);
 
   const otpInputRef = useRef<HTMLInputElement>(null);
 
@@ -520,6 +551,274 @@ export default function AdminGatePage() {
     }
   };
 
+  // -------------------------------------------------------------
+  // Bulk Upload (Excel / CSV) Handlers
+  // -------------------------------------------------------------
+  const handleDownloadTemplate = (format: "xlsx" | "csv") => {
+    if (format === "csv") {
+      const csvContent =
+        "Full Name,Email Address,Phone Number,Tier (Optional),Amount (Optional)\n" +
+        "Rahul Sharma,rahul.sharma@example.com,9876543210,Spot Entry Pass,349\n" +
+        "Ananya Rao,ananya.rao@example.com,9845123456,Spot Entry Pass,349\n" +
+        "Mohammed Farhan,m.farhan@example.com,9741234567,Spot Entry Pass,349\n";
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", "echosphere_attendees_template.csv");
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      addToast("Downloaded CSV template", "info");
+    } else {
+      try {
+        const wb = XLSX.utils.book_new();
+        const wsData = [
+          ["Full Name", "Email Address", "Phone Number", "Tier (Optional)", "Amount (Optional)"],
+          ["Rahul Sharma", "rahul.sharma@example.com", "9876543210", "Spot Entry Pass", 349],
+          ["Ananya Rao", "ananya.rao@example.com", "9845123456", "Spot Entry Pass", 349],
+          ["Mohammed Farhan", "m.farhan@example.com", "9741234567", "Spot Entry Pass", 349],
+        ];
+        const ws = XLSX.utils.aoa_to_sheet(wsData);
+        ws["!cols"] = [{ wch: 24 }, { wch: 30 }, { wch: 18 }, { wch: 20 }, { wch: 16 }];
+        XLSX.utils.book_append_sheet(wb, ws, "Attendees");
+        XLSX.writeFile(wb, "echosphere_attendees_template.xlsx");
+        addToast("Downloaded Excel template (.xlsx)", "info");
+      } catch {
+        const effectiveApiUrl = getApiUrl();
+        window.open(`${effectiveApiUrl}/api/admin/tickets/template?format=xlsx`, "_blank");
+      }
+    }
+  };
+
+  const handleFileSelect = (file: File) => {
+    setBulkError(null);
+    setSelectedFileName(file.name);
+    setSelectedFileSize(`${(file.size / 1024).toFixed(1)} KB`);
+
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (!["xlsx", "xls", "csv"].includes(ext || "")) {
+      setBulkError("Invalid file format. Please upload an Excel (.xlsx, .xls) or CSV file.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const buffer = e.target?.result as ArrayBuffer;
+        const workbook = XLSX.read(buffer, { type: "array" });
+        const firstSheetName = workbook.SheetNames[0];
+        if (!firstSheetName) {
+          throw new Error("No worksheets found in this spreadsheet.");
+        }
+        const worksheet = workbook.Sheets[firstSheetName];
+        const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+
+        if (!rawRows || rawRows.length === 0) {
+          throw new Error("The selected file is empty.");
+        }
+
+        const nonEmptyRows = rawRows.filter(
+          (row) => row && row.some((cell) => cell !== null && cell !== undefined && String(cell).trim() !== "")
+        );
+
+        if (nonEmptyRows.length === 0) {
+          throw new Error("No data rows found in this sheet.");
+        }
+
+        // Header column auto-detection
+        let headerIdx = -1;
+        let colName = -1;
+        let colEmail = -1;
+        let colPhone = -1;
+        let colTier = -1;
+        let colAmount = -1;
+
+        for (let i = 0; i < Math.min(5, nonEmptyRows.length); i++) {
+          const row = nonEmptyRows[i];
+          const lowerRow = row.map((c) => String(c || "").trim().toLowerCase());
+          const hasName = lowerRow.some((c) => ["name", "attendee", "participant", "student"].some((k) => c.includes(k)));
+          const hasEmail = lowerRow.some((c) => ["email", "mail"].some((k) => c.includes(k)));
+          const hasPhone = lowerRow.some((c) => ["phone", "mobile", "contact", "cell"].some((k) => c.includes(k)));
+
+          if ((hasName && hasEmail) || (hasEmail && hasPhone) || (hasName && hasPhone)) {
+            headerIdx = i;
+            lowerRow.forEach((cellStr, cIdx) => {
+              if (["full name", "fullname", "name", "attendee", "participant"].some((k) => cellStr.includes(k)) && colName === -1) {
+                colName = cIdx;
+              } else if (["email", "mail", "e-mail"].some((k) => cellStr.includes(k)) && colEmail === -1) {
+                colEmail = cIdx;
+              } else if (["phone", "mobile", "contact", "cell", "whatsapp"].some((k) => cellStr.includes(k)) && colPhone === -1) {
+                colPhone = cIdx;
+              } else if (["tier", "ticket type", "pass", "category"].some((k) => cellStr.includes(k)) && colTier === -1) {
+                colTier = cIdx;
+              } else if (["amount", "price", "fee", "cost", "paid"].some((k) => cellStr.includes(k)) && colAmount === -1) {
+                colAmount = cIdx;
+              }
+            });
+            break;
+          }
+        }
+
+        const dataStart = headerIdx !== -1 ? headerIdx + 1 : 0;
+        if (colName === -1 || colEmail === -1) {
+          colName = 0;
+          colEmail = 1;
+          colPhone = 2;
+          colTier = 3;
+          colAmount = 4;
+        }
+
+        const attendees: ParsedAttendee[] = [];
+        const seenEmails = new Set<string>();
+
+        for (let i = dataStart; i < nonEmptyRows.length; i++) {
+          const row = nonEmptyRows[i];
+          const rawName = row[colName];
+          const rawEmail = row[colEmail];
+          const rawPhone = colPhone !== -1 ? row[colPhone] : "";
+          const rawTier = colTier !== -1 ? row[colTier] : undefined;
+          const rawAmount = colAmount !== -1 ? row[colAmount] : undefined;
+
+          const name = String(rawName || "").trim();
+          const email = String(rawEmail || "").trim().toLowerCase();
+          
+          let phoneStr = String(rawPhone !== undefined && rawPhone !== null ? rawPhone : "").trim();
+          if (phoneStr.endsWith(".0")) phoneStr = phoneStr.slice(0, -2);
+          let digits = phoneStr.replace(/\D/g, "");
+          if (digits.startsWith("91") && digits.length === 12) {
+            digits = digits.slice(2);
+          } else if (digits.startsWith("0") && digits.length === 11) {
+            digits = digits.slice(1);
+          }
+
+          let isValid = true;
+          let validationError = "";
+
+          if (!name || name.length < 2) {
+            isValid = false;
+            validationError = "Missing or invalid name";
+          } else if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            isValid = false;
+            validationError = "Invalid email format";
+          } else if (seenEmails.has(email)) {
+            isValid = false;
+            validationError = "Duplicate email in file";
+          }
+
+          if (email) seenEmails.add(email);
+
+          let parsedAmt: number | undefined = undefined;
+          if (rawAmount !== undefined && rawAmount !== null && String(rawAmount).trim() !== "") {
+            const num = parseFloat(String(rawAmount));
+            if (!isNaN(num) && num >= 0) parsedAmt = num;
+          }
+
+          attendees.push({
+            fullName: name,
+            email,
+            phone: digits || "9876543210",
+            tier: rawTier ? String(rawTier).trim() : undefined,
+            amount: parsedAmt,
+            isValid,
+            validationError: validationError || undefined,
+          });
+        }
+
+        if (attendees.length === 0) {
+          throw new Error("No participant records could be read from this sheet.");
+        }
+
+        setParsedAttendees(attendees);
+        setBulkStep("preview");
+      } catch (err: unknown) {
+        setBulkError(err instanceof Error ? err.message : "Failed to parse spreadsheet file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handleBulkSubmit = async () => {
+    const validAttendees = parsedAttendees.filter((a) => a.isValid);
+    if (validAttendees.length === 0) {
+      setBulkError("No valid attendee records found to import. Please check your file.");
+      return;
+    }
+
+    if (stats && stats.available_tickets < validAttendees.length) {
+      setBulkError(
+        `Cannot issue ${validAttendees.length} passes. Only ${stats.available_tickets} spots remain before reaching the 2000 capacity limit.`
+      );
+      return;
+    }
+
+    setBulkError(null);
+    setIsSubmittingBulk(true);
+    setBulkStep("importing");
+
+    try {
+      const effectiveApiUrl = getApiUrl();
+      const defaultAmt = parseFloat(bulkAmount) || 349.0;
+
+      const payload = {
+        attendees: validAttendees.map((a) => ({
+          full_name: a.fullName,
+          email: a.email,
+          phone: a.phone,
+          tier: a.tier || bulkTier,
+          amount: a.amount !== undefined ? a.amount : defaultAmt,
+        })),
+        tier: bulkTier,
+        amount: defaultAmt,
+        send_email: bulkSendEmail,
+        admit_now: bulkAdmitNow,
+      };
+
+      const res = await fetch(`${effectiveApiUrl}/api/admin/tickets/bulk-create`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Failed to bulk create passes.");
+      }
+
+      setBulkSuccessResult({
+        count: data.count,
+        firstTicket: data.first_ticket,
+        lastTicket: data.last_ticket,
+        message: data.message,
+      });
+      setBulkStep("success");
+
+      try {
+        confetti({
+          particleCount: 160,
+          spread: 90,
+          origin: { y: 0.6 },
+          colors: ["#6366f1", "#a855f7", "#3b82f6", "#10b981", "#fbbf24"],
+        });
+      } catch {}
+
+      addToast(data.message, "success");
+
+      if (adminToken) {
+        void fetchDashboardData(adminToken);
+      }
+    } catch (err: unknown) {
+      setBulkError(err instanceof Error ? err.message : "Bulk creation failed.");
+      setBulkStep("preview");
+    } finally {
+      setIsSubmittingBulk(false);
+    }
+  };
+
   // Handle Update Tier Settings (Pricing, Scarcity & Gateway)
   const handleSaveTierSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -896,6 +1195,23 @@ export default function AdminGatePage() {
 
               <button
                 type="button"
+                onClick={() => {
+                  setIsBulkModalOpen(true);
+                  setBulkStep("upload");
+                  setBulkError(null);
+                  setBulkSuccessResult(null);
+                  setParsedAttendees([]);
+                  setSelectedFileName(null);
+                }}
+                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-xs flex items-center gap-1.5 shadow-sm transition"
+                title="Bulk upload participants via Excel (.xlsx) or CSV"
+              >
+                <span>📊</span>
+                <span>Bulk Import (Excel / CSV)</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setIsAddModalOpen(true)}
                 className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center gap-2 shadow-sm transition"
               >
@@ -913,25 +1229,6 @@ export default function AdminGatePage() {
                 <span>Export CSV</span>
               </button>
 
-              <button
-                type="button"
-                onClick={handleReconcileOrders}
-                disabled={isReconciling}
-                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-sm transition flex items-center gap-1.5"
-                title="Cross-check all pending orders directly against Cashfree API and recover missing passes"
-              >
-                <span>{isReconciling ? "⏳" : "⚡"}</span>
-                <span>{isReconciling ? "Syncing..." : "Sync Cashfree"}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => adminToken && void fetchDashboardData(adminToken)}
-                disabled={isRefreshing}
-                className="px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 font-medium text-xs border border-slate-700/60 transition"
-              >
-                {isRefreshing ? "Syncing..." : "🔄 Refresh"}
-              </button>
 
               <button
                 type="button"
@@ -1977,6 +2274,428 @@ export default function AdminGatePage() {
                     </button>
                   </div>
                 </form>
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================================= */}
+          {/* 6. BULK IMPORT MODAL (EXCEL / CSV)                                        */}
+          {/* ========================================================================= */}
+          {isBulkModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in overflow-y-auto">
+              <div className="relative w-full max-w-2xl rounded-2xl bg-[#0d1022] border border-slate-800 p-5 sm:p-6 space-y-5 shadow-2xl text-left my-auto">
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3.5">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="p-1 rounded-lg bg-blue-500/10 text-blue-400 text-sm">📊</span>
+                      <h3 className="text-base font-bold text-white">Bulk Participant Upload</h3>
+                      <span className="px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[10px] font-bold">
+                        Excel / CSV
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Upload an Excel spreadsheet or CSV with participant details. Sequential passes (#0001–#2000) will be assigned atomically.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!isSubmittingBulk) {
+                        setIsBulkModalOpen(false);
+                        setBulkStep("upload");
+                        setParsedAttendees([]);
+                        setSelectedFileName(null);
+                        setBulkError(null);
+                      }
+                    }}
+                    className="text-slate-400 hover:text-white text-lg p-1 transition"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {bulkError && (
+                  <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2">
+                    <span className="text-rose-400 mt-0.5 font-bold">⚠️</span>
+                    <span className="flex-1">{bulkError}</span>
+                  </div>
+                )}
+
+                {/* ------------------------------------------------------------- */}
+                {/* STEP: UPLOAD                                                  */}
+                {/* ------------------------------------------------------------- */}
+                {bulkStep === "upload" && (
+                  <div className="space-y-5">
+                    {/* Step 1: Download Templates */}
+                    <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h4 className="text-xs font-bold text-slate-200">Step 1: Download Pre-Formatted Template</h4>
+                          <p className="text-[11px] text-slate-400">
+                            Use this template with columns: <span className="text-slate-200 font-mono font-semibold">Full Name, Email Address, Phone Number</span>.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadTemplate("xlsx")}
+                          className="px-3.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-semibold text-xs transition flex items-center gap-1.5"
+                        >
+                          <span>📥</span>
+                          <span>Download Excel Template (.xlsx)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadTemplate("csv")}
+                          className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 font-medium text-xs transition flex items-center gap-1.5"
+                        >
+                          <span>📄</span>
+                          <span>Download CSV Template (.csv)</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Step 2: File Upload Zone */}
+                    <div className="space-y-2">
+                      <h4 className="text-xs font-bold text-slate-200">Step 2: Upload Your Filled Spreadsheet</h4>
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          setIsDraggingFile(true);
+                        }}
+                        onDragLeave={() => setIsDraggingFile(false)}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          setIsDraggingFile(false);
+                          if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                            handleFileSelect(e.dataTransfer.files[0]);
+                          }
+                        }}
+                        className={`relative rounded-2xl border-2 border-dashed p-6 sm:p-8 text-center transition cursor-pointer flex flex-col items-center justify-center space-y-3 ${
+                          isDraggingFile
+                            ? "border-blue-500 bg-blue-500/10"
+                            : "border-slate-700 bg-slate-900/50 hover:border-slate-600 hover:bg-slate-900"
+                        }`}
+                        onClick={() => {
+                          const input = document.getElementById("bulk-file-input") as HTMLInputElement;
+                          if (input) input.click();
+                        }}
+                      >
+                        <input
+                          id="bulk-file-input"
+                          type="file"
+                          accept=".xlsx,.xls,.csv"
+                          className="hidden"
+                          onChange={(e) => {
+                            if (e.target.files && e.target.files.length > 0) {
+                              handleFileSelect(e.target.files[0]);
+                            }
+                          }}
+                        />
+                        <div className="w-12 h-12 rounded-full bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 text-xl shadow-lg shadow-blue-500/10">
+                          📁
+                        </div>
+                        <div className="space-y-1">
+                          <p className="text-xs sm:text-sm font-bold text-slate-200">
+                            Click to select or drag and drop your spreadsheet here
+                          </p>
+                          <p className="text-[11px] text-slate-400">
+                            Supported file formats: Microsoft Excel (<span className="text-blue-300 font-mono">.xlsx, .xls</span>) or CSV (<span className="text-blue-300 font-mono">.csv</span>)
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Step 3: Default Configuration */}
+                    <div className="rounded-xl bg-slate-900/60 border border-slate-800 p-4 space-y-3">
+                      <h4 className="text-xs font-bold text-slate-200">Step 3: Default Pass &amp; Entry Configuration</h4>
+                      
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <label className="text-xs font-semibold text-slate-300">Access Tier</label>
+                          <input
+                            type="text"
+                            value={bulkTier}
+                            onChange={(e) => setBulkTier(e.target.value)}
+                            placeholder="e.g. Spot Entry Pass"
+                            className="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-semibold text-emerald-400 font-mono">
+                            Amount per Pass (₹)
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={bulkAmount}
+                            onChange={(e) => setBulkAmount(e.target.value)}
+                            className="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-emerald-500/40 text-emerald-300 font-mono font-bold text-xs focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Tier Presets */}
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <span className="text-[11px] text-slate-400">Quick presets:</span>
+                        {[
+                          { label: "Spot Entry Pass", price: "349" },
+                          { label: "Early Bird", price: String(currentTierSettings?.price || "349") },
+                          { label: "Complimentary / Free Pass", price: "0" },
+                        ].map((p) => (
+                          <button
+                            key={p.label}
+                            type="button"
+                            onClick={() => {
+                              setBulkTier(p.label);
+                              setBulkAmount(p.price);
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition ${
+                              bulkTier === p.label
+                                ? "bg-blue-600/25 border-blue-500 text-blue-200"
+                                : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                            }`}
+                          >
+                            {p.label} (₹{p.price})
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Checkboxes */}
+                      <div className="space-y-2 pt-2 border-t border-slate-800/80">
+                        <label className="flex items-center gap-2.5 text-xs text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={bulkSendEmail}
+                            onChange={(e) => setBulkSendEmail(e.target.checked)}
+                            className="rounded accent-blue-600"
+                          />
+                          <span>
+                            <strong className="text-white">Dispatch official EchoSphere digital pass</strong> to each attendee&apos;s email immediately
+                          </span>
+                        </label>
+                        <label className="flex items-center gap-2.5 text-xs text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={bulkAdmitNow}
+                            onChange={(e) => setBulkAdmitNow(e.target.checked)}
+                            className="rounded accent-emerald-600"
+                          />
+                          <span>Immediately admit all attendees (Mark checked-in at gate)</span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ------------------------------------------------------------- */}
+                {/* STEP: PREVIEW                                                 */}
+                {/* ------------------------------------------------------------- */}
+                {bulkStep === "preview" && (
+                  <div className="space-y-4">
+                    {/* File & Validation Summary */}
+                    <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-xl bg-slate-900 border border-slate-800">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">📄</span>
+                        <div>
+                          <p className="text-xs font-bold text-white truncate max-w-[240px] sm:max-w-md">
+                            {selectedFileName}
+                          </p>
+                          <span className="text-[11px] text-slate-400">{selectedFileSize}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold font-mono">
+                          {parsedAttendees.filter((a) => a.isValid).length} Valid
+                        </span>
+                        {parsedAttendees.some((a) => !a.isValid) && (
+                          <span className="px-2.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-bold font-mono">
+                            {parsedAttendees.filter((a) => !a.isValid).length} Invalid
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBulkStep("upload");
+                            setParsedAttendees([]);
+                            setSelectedFileName(null);
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+                        >
+                          Change File
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Import Options Summary Bar */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 rounded-xl bg-blue-950/30 border border-blue-500/20 text-xs">
+                      <div className="flex items-center gap-2 text-blue-200">
+                        <span>Tier: <strong className="text-white">{bulkTier}</strong></span>
+                        <span>•</span>
+                        <span>Price: <strong className="text-white">₹{bulkAmount}</strong></span>
+                      </div>
+                      <div className="flex items-center gap-2 text-[11px] text-slate-400">
+                        <span>{bulkSendEmail ? "✅ Emails will be dispatched" : "⚠️ Emails suppressed"}</span>
+                        <span>•</span>
+                        <span>{bulkAdmitNow ? "✅ Auto-admit at gate" : "Pending gate check-in"}</span>
+                      </div>
+                    </div>
+
+                    {/* Preview Table */}
+                    <div className="rounded-xl border border-slate-800 overflow-hidden bg-slate-950/60 max-h-64 overflow-y-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead className="sticky top-0 bg-slate-900 border-b border-slate-800 text-[11px] font-mono uppercase text-slate-400">
+                          <tr>
+                            <th className="px-3 py-2">#</th>
+                            <th className="px-3 py-2">Attendee Name</th>
+                            <th className="px-3 py-2">Email Address</th>
+                            <th className="px-3 py-2">Phone</th>
+                            <th className="px-3 py-2 text-right">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/60">
+                          {parsedAttendees.map((att, idx) => (
+                            <tr
+                              key={`${att.email}-${idx}`}
+                              className={`hover:bg-slate-900/40 transition ${
+                                !att.isValid ? "bg-rose-950/20 text-rose-300" : ""
+                              }`}
+                            >
+                              <td className="px-3 py-2 font-mono text-slate-500">{idx + 1}</td>
+                              <td className="px-3 py-2 font-medium text-white">{att.fullName}</td>
+                              <td className="px-3 py-2 text-slate-300 font-mono truncate max-w-[180px]">
+                                {att.email}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-slate-400">{att.phone}</td>
+                              <td className="px-3 py-2 text-right">
+                                {att.isValid ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-bold">
+                                    <span>✓</span>
+                                    <span>Ready</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[10px] font-bold" title={att.validationError}>
+                                    <span>✕</span>
+                                    <span>{att.validationError || "Invalid"}</span>
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Capacity notice */}
+                    {stats && (
+                      <div className="flex items-center justify-between text-[11px] text-slate-400 px-1">
+                        <span>
+                          Available concert capacity: <strong className="text-white font-mono">{stats.available_tickets}</strong> passes remaining.
+                        </span>
+                        <span>
+                          Next pass starting from: <strong className="text-indigo-300 font-mono">#{stats.next_ticket_id}</strong>
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Preview Actions */}
+                    <div className="flex justify-end gap-2.5 pt-2 border-t border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBulkStep("upload");
+                          setParsedAttendees([]);
+                        }}
+                        className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition"
+                      >
+                        Back
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleBulkSubmit}
+                        disabled={isSubmittingBulk || parsedAttendees.filter((a) => a.isValid).length === 0}
+                        className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 font-bold text-xs text-white shadow-lg shadow-indigo-600/30 transition disabled:opacity-50 flex items-center gap-2"
+                      >
+                        <span>🚀</span>
+                        <span>
+                          Issue {parsedAttendees.filter((a) => a.isValid).length} Passes &amp; Send Emails →
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* ------------------------------------------------------------- */}
+                {/* STEP: IMPORTING                                               */}
+                {/* ------------------------------------------------------------- */}
+                {bulkStep === "importing" && (
+                  <div className="py-12 flex flex-col items-center justify-center text-center space-y-4">
+                    <div className="w-12 h-12 border-3 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                    <div className="space-y-1">
+                      <h4 className="text-base font-bold text-white">
+                        Generating Passes &amp; Delivering Emails...
+                      </h4>
+                      <p className="text-xs text-slate-400 max-w-sm">
+                        Atomically assigning sequential pass numbers (#0001–#2000), computing SHA-256 security hashes, and dispatching official confirmation emails.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* ------------------------------------------------------------- */}
+                {/* STEP: SUCCESS                                                 */}
+                {/* ------------------------------------------------------------- */}
+                {bulkStep === "success" && bulkSuccessResult && (
+                  <div className="py-4 space-y-5 text-center">
+                    <div className="w-16 h-16 mx-auto rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center shadow-lg shadow-emerald-500/20 text-3xl">
+                      🎉
+                    </div>
+
+                    <div className="space-y-1">
+                      <h4 className="text-xl font-black text-white">
+                        Successfully Created {bulkSuccessResult.count} Concert Passes!
+                      </h4>
+                      <p className="text-xs text-slate-300 max-w-md mx-auto">
+                        {bulkSuccessResult.message}
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 max-w-md mx-auto text-left text-xs">
+                      <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                        <span className="text-[10px] uppercase text-slate-400 font-mono block">Pass ID Range</span>
+                        <span className="text-lg font-mono font-bold text-indigo-300">
+                          #{bulkSuccessResult.firstTicket} – #{bulkSuccessResult.lastTicket}
+                        </span>
+                      </div>
+                      <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+                        <span className="text-[10px] uppercase text-slate-400 font-mono block">Email Delivery</span>
+                        <span className="text-sm font-semibold text-emerald-400 flex items-center gap-1.5 pt-1">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>Dispatched via SMTP</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-slate-800 flex justify-center">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsBulkModalOpen(false);
+                          setBulkStep("upload");
+                          setParsedAttendees([]);
+                          setSelectedFileName(null);
+                          setBulkSuccessResult(null);
+                        }}
+                        className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-indigo-600/30"
+                      >
+                        Done &amp; View Roster
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

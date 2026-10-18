@@ -290,6 +290,120 @@ def create_manual_ticket(
             "email_sent": False,
         }
 
+def create_bulk_tickets(
+    attendees: list[Dict[str, Any]],
+    secret_key: str,
+    default_tier: str = "Spot Entry Pass",
+    default_amount: float = 349.0,
+    payment_method: str = "Bulk Import / Excel",
+    admit_now: bool = False,
+) -> list[Dict[str, Any]]:
+    """
+    Creates multiple sequential tickets atomically in a single SQLite transaction.
+    Guarantees strict sequential IDs (0001 to 2000), SHA-256 security hashes,
+    and zero corruption or modification to existing records.
+    """
+    if not attendees:
+        return []
+
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT MAX(id) as max_id FROM tickets")
+        row = cursor.fetchone()
+        current_max = row["max_id"] or 0
+        
+        needed = len(attendees)
+        if current_max + needed > 2000:
+            available = max(0, 2000 - current_max)
+            conn.close()
+            raise ValueError(
+                f"Cannot create {needed} passes. Only {available} passes remain before reaching the maximum concert limit of 2000."
+            )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        batch_timestamp = int(time.time() * 1000)
+        created_tickets = []
+        next_id = current_max
+
+        insert_rows = []
+        for idx, att in enumerate(attendees):
+            next_id += 1
+            ticket_number = f"{next_id:04d}"
+            
+            full_name = str(att.get("full_name") or att.get("name") or "").strip()
+            email = str(att.get("email") or "").strip().lower()
+            phone = str(att.get("phone") or "").strip()
+            tier = str(att.get("tier") or default_tier).strip()
+            
+            raw_amt = att.get("amount")
+            try:
+                amount = float(raw_amt) if raw_amt is not None and str(raw_amt).strip() != "" else default_amount
+            except Exception:
+                amount = default_amount
+
+            # Tamper-proof security hash
+            hash_seed = f"{ticket_number}:{email}:{tier}:{secret_key}:{now_iso}"
+            sec_hash = hashlib.sha256(hash_seed.encode("utf-8")).hexdigest()
+            payment_id = f"BULK_{batch_timestamp}_{next_id}"
+
+            checked_in_val = 1 if admit_now else 0
+            checked_in_at_val = now_iso if admit_now else None
+
+            insert_rows.append(
+                (
+                    next_id,
+                    ticket_number,
+                    full_name,
+                    email,
+                    phone,
+                    tier,
+                    amount,
+                    "INR",
+                    payment_id,
+                    "completed",
+                    0,  # email_sent
+                    sec_hash,
+                    now_iso,
+                    checked_in_val,
+                    checked_in_at_val,
+                )
+            )
+
+            created_tickets.append(
+                {
+                    "id": next_id,
+                    "ticket_number": ticket_number,
+                    "full_name": full_name,
+                    "email": email,
+                    "phone": phone,
+                    "tier": tier,
+                    "amount": amount,
+                    "currency": "INR",
+                    "payment_id": payment_id,
+                    "security_hash": sec_hash,
+                    "created_at": now_iso,
+                    "checked_in": checked_in_val,
+                    "checked_in_at": checked_in_at_val,
+                    "email_sent": False,
+                }
+            )
+
+        cursor.executemany(
+            """
+            INSERT INTO tickets (
+                id, ticket_number, full_name, email, phone, tier, amount,
+                currency, payment_id, payment_status, email_sent, security_hash, created_at, checked_in, checked_in_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            insert_rows,
+        )
+        conn.commit()
+        conn.close()
+
+        return created_tickets
+
 def mark_email_sent(ticket_number: str):
     with db_lock:
         conn = get_connection()

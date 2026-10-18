@@ -21,7 +21,11 @@ echo -e "${BLUE}${BOLD}======================================================${N
 # 0. Pull latest code from GitHub if git repository detected
 if command -v git &> /dev/null && { [ -d ".git" ] || [ -d "../.git" ]; }; then
     echo -e "${GREEN}[0/6] Pulling latest updates from GitHub (main)...${NC}"
-    git pull origin main || echo -e "${YELLOW}Notice: git pull skipped or working tree already up to date.${NC}"
+    git pull origin main || {
+        echo -e "${YELLOW}Notice: git pull encountered local changes. Stashing and pulling cleanly...${NC}"
+        git stash || true
+        git pull origin main || true
+    }
 fi
 
 # 1. Resolve Script & Working Directory
@@ -40,12 +44,12 @@ fi
 
 echo -e "${GREEN}[1/6] Working directory:${NC} $BACKEND_DIR"
 
-# 2. Setup & Update .env file automatically (Guarantees ADMIN_EMAIL=shreyas.u.sondur@gmail.com)
+# 2. Setup & Update .env file automatically (Guarantees ADMIN_EMAIL & new KONFHUB_EVENT_URL)
 echo -e "${GREEN}[2/6] Updating .env configuration automatically...${NC}"
 
 # Decode embedded production base64 config directly into .env
 cat << 'ENV_B64_EOF' | base64 -d > .env
-UE9SVD04MDAyCkhPU1Q9MC4wLjAuMApDT1JTX09SSUdJTlM9aHR0cHM6Ly9lY2hvc3BoZXJlLnN1aWV0LndlYnNpdGUsaHR0cHM6Ly93d3cuZWNob3NwaGVyZS5zdWlldC53ZWJzaXRlLGh0dHA6Ly9sb2NhbGhvc3Q6MzAwMCxodHRwOi8vMTI3LjAuMC4xOjMwMDAsaHR0cDovLzEzLjE0MC4xNzIuMTE3OjgwMDIKU01UUF9FTUFJTD13ZWJmbG93Y29tbXVuaXR5QHNyaW5pdmFzdW5pdmVyc2l0eS5lZHUuaW4KU01UUF9QQVNTV09SRD1jYnFhcWlncnNmaWJwdmt6ClNNVFBfSE9TVD1zbXRwLmdtYWlsLmNvbQpTTVRQX1BPUlQ9NTg3ClBBWU1FTlRfR0FURVdBWV9LRVk9ClBBWU1FTlRfR0FURVdBWV9TRUNSRVQ9CkNBU0hGUkVFX0FQUF9JRD0xNDYwNzE1YmIwYmZhYmM0ZmMzYzczMGRiM2Q1MTcwNjQxCkNBU0hGUkVFX1NFQ1JFVF9LRVk9Y2Zza19tYV9wcm9kXzNjN2ZkYmY5YWI4YzY3Y2ExODAxMDBhOGNjZjQ1MDg5X2M2ZjZhZTA0CkNBU0hGUkVFX0FQSV9WRVJTSU9OPTIwMjMtMDgtMDEKQ0FTSEZSRUVfRU5WPXByb2R1Y3Rpb24KQ0FTSEZSRUVfUkVUVVJOX1VSTD1odHRwczovL2VjaG9zcGhlcmUuc3VpZXQud2Vic2l0ZS8/b3JkZXJfaWQ9e29yZGVyX2lkfQpTRUNSRVRfS0VZPWNvbmNlcnRfc2VjdXJlX3NlY3JldF90b2tlbl9uYWpyYW5fYmVuamlfOTgzNzQ5ODIzNDIzCkFETUlOX1BBU1NXT1JEPWlkb250a25vdwpBRE1JTl9FTUFJTD1zaHJleWFzLnUuc29uZHVyQGdtYWlsLmNvbQo=
+UE9SVD04MDAyCkhPU1Q9MC4wLjAuMApDT1JTX09SSUdJTlM9aHR0cHM6Ly9lY2hvc3BoZXJlLnN1aWV0LndlYnNpdGUsaHR0cHM6Ly93d3cuZWNob3NwaGVyZS5zdWlldC53ZWJzaXRlLGh0dHA6Ly9sb2NhbGhvc3Q6MzAwMCxodHRwOi8vMTI3LjAuMC4xOjMwMDAsaHR0cDovLzEzLjE0MC4xNzIuMTE3OjgwMDIKU01UUF9FTUFJTD13ZWJmbG93Y29tbXVuaXR5QHNyaW5pdmFzdW5pdmVyc2l0eS5lZHUuaW4KU01UUF9QQVNTV09SRD1jYnFhcWlncnNmaWJwdmt6ClNNVFBfSE9TVD1zbXRwLmdtYWlsLmNvbQpTTVRQX1BPUlQ9NTg3ClBBWU1FTlRfR0FURVdBWV9LRVk9ClBBWU1FTlRfR0FURVdBWV9TRUNSRVQ9CkNBU0hGUkVFX0FQUF9JRD0xNDYwNzE1YmIwYmZhYmM0ZmMzYzczMGRiM2Q1MTcwNjQxCkNBU0hGUkVFX1NFQ1JFVF9LRVk9Y2Zza19tYV9wcm9kXzNjN2ZkYmY5YWI4YzY3Y2ExODAxMDBhOGNjZjQ1MDg5X2M2ZjZhZTA0CkNBU0hGUkVFX0FQSV9WRVJTSU9OPTIwMjMtMDgtMDEKQ0FTSEZSRUVfRU5WPXByb2R1Y3Rpb24KQ0FTSEZSRUVfUkVUVVJOX1VSTD1odHRwczovL2VjaG9zcGhlcmUuc3VpZXQud2Vic2l0ZS8/b3JkZXJfaWQ9e29yZGVyX2lkfQpTRUNSRVRfS0VZPWNvbmNlcnRfc2VjdXJlX3NlY3JldF90b2tlbl9uYWpyYW5fYmVuamlfOTgzNzQ5ODIzNDIzCkFETUlOX1BBU1NXT1JEPWlkb250a25vdwpBRE1JTl9FTUFJTD1zaHJleWFzLnUuc29uZHVyQGdtYWlsLmNvbQpLT05GSFVCX0VWRU5UX1VSTD1odHRwczovL2tvbmZodWIuY29tL3dpZGdldC9pZC9iNWRlMDQ2Ny0yNWRmLTRjNTUtYmI1Mi0wZTc5N2I1ZGMwMmMK
 ENV_B64_EOF
 
 # Explicitly guarantee ADMIN_EMAIL is shreyas.u.sondur@gmail.com
@@ -53,13 +57,21 @@ if ! grep -q "ADMIN_EMAIL=shreyas.u.sondur@gmail.com" .env; then
     sed -i 's/^ADMIN_EMAIL=.*/ADMIN_EMAIL=shreyas.u.sondur@gmail.com/' .env || echo "ADMIN_EMAIL=shreyas.u.sondur@gmail.com" >> .env
 fi
 
-# Explicitly guarantee KONFHUB_EVENT_URL is set
+# Explicitly guarantee new KONFHUB_EVENT_URL is active
 if ! grep -q "KONFHUB_EVENT_URL" .env; then
-    echo "KONFHUB_EVENT_URL=https://konfhub.com/echosphere-20" >> .env
+    echo "KONFHUB_EVENT_URL=https://konfhub.com/widget/id/b5de0467-25df-4c55-bb52-0e797b5dc02c" >> .env
+else
+    sed -i 's|^KONFHUB_EVENT_URL=.*|KONFHUB_EVENT_URL=https://konfhub.com/widget/id/b5de0467-25df-4c55-bb52-0e797b5dc02c|' .env
+fi
+
+# Mirror to root directory if running from parent repository
+if [ "$SCRIPT_DIR" != "$BACKEND_DIR" ]; then
+    cp .env "$SCRIPT_DIR/.env" 2>/dev/null || true
 fi
 
 chmod 600 .env
 echo -e "${GREEN}✓ .env active and verified:${NC} ADMIN_EMAIL=shreyas.u.sondur@gmail.com | PORT=8002"
+echo -e "${GREEN}✓ KonfHub Widget URL:${NC} https://konfhub.com/widget/id/b5de0467-25df-4c55-bb52-0e797b5dc02c"
 
 # 3. Ensure Python3 and venv utilities are available
 echo -e "${GREEN}[3/6] Verifying Python 3 environment...${NC}"
@@ -156,16 +168,25 @@ for i in {1..15}; do
 done
 echo ""
 
+# Optional Frontend check (if pm2 is managing frontend on VPS)
+if command -v pm2 &> /dev/null; then
+    if pm2 list | grep -qi "frontend"; then
+        echo -e "${GREEN}Reloading frontend PM2 process...${NC}"
+        pm2 reload frontend || pm2 restart frontend || true
+    fi
+fi
+
 if [ "$READY" -eq 1 ]; then
     echo -e "\n${GREEN}${BOLD}======================================================${NC}"
     echo -e "${GREEN}${BOLD}   💥 BOOM DONE! EchoSphere Backend is 100% LIVE!     ${NC}"
     echo -e "${GREEN}${BOLD}======================================================${NC}"
-    echo -e "   • Local Health:  ${BOLD}http://127.0.0.1:8002/api/health${NC}"
-    echo -e "   • Contabo VPS:   ${BOLD}http://13.140.172.117:8002${NC}"
-    echo -e "   • Frontend:      ${BOLD}https://echosphere.suiet.website${NC}"
-    echo -e "   • Admin Email:   ${BOLD}shreyas.u.sondur@gmail.com${NC}"
-    echo -e "   • Cashfree Mode: ${BOLD}Production (Approved)${NC}"
-    echo -e "   • SMTP Port:     ${BOLD}587 (Dual-port failover active)${NC}"
+    echo -e "   • Local Health:    ${BOLD}http://127.0.0.1:8002/api/health${NC}"
+    echo -e "   • Contabo VPS:     ${BOLD}http://13.140.172.117:8002${NC}"
+    echo -e "   • Frontend:        ${BOLD}https://echosphere.suiet.website${NC}"
+    echo -e "   • KonfHub Widget:  ${BOLD}https://konfhub.com/widget/id/b5de0467-25df-4c55-bb52-0e797b5dc02c${NC}"
+    echo -e "   • Admin Email:     ${BOLD}shreyas.u.sondur@gmail.com${NC}"
+    echo -e "   • Cashfree Mode:   ${BOLD}Production (Approved)${NC}"
+    echo -e "   • SMTP Port:       ${BOLD}587 (Dual-port failover active)${NC}"
     echo -e "\n${BOLD}Backend is running cleanly in background via systemd!${NC}"
 else
     echo -e "${RED}[WARNING] Service started, but health check is taking longer to respond.${NC}"
