@@ -48,6 +48,8 @@ from database import (
     validate_admin_session,
     get_tier_settings,
     update_tier_settings,
+    update_ticket_details,
+    delete_ticket,
 )
 from email_service import (
     send_ticket_confirmation_email,
@@ -1900,6 +1902,116 @@ def admin_resend_ticket_email(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to deliver email to {ticket['email']}. Please check SMTP connectivity.",
         )
+
+
+class AdminUpdateTicketRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    tier: Optional[str] = None
+    amount: Optional[float] = None
+    resend_email: Optional[bool] = False
+
+@app.put("/api/admin/tickets/{ticket_number}")
+@app.patch("/api/admin/tickets/{ticket_number}")
+def admin_update_ticket(
+    ticket_number: str,
+    payload: AdminUpdateTicketRequest,
+    admin_token: str = Depends(require_admin),
+):
+    """
+    Updates attendee details (full_name, email, phone, tier, amount) for an existing ticket.
+    Preserves ticket_number (Pass ID) so admittance remains valid.
+    Optionally re-sends the concert pass confirmation email immediately to the updated email.
+    """
+    if payload.email is not None:
+        clean_email = payload.email.strip().lower()
+        if not clean_email or "@" not in clean_email or "." not in clean_email.split("@")[-1]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please provide a valid email address.",
+            )
+
+    updated_ticket = update_ticket_details(
+        ticket_number=ticket_number,
+        full_name=payload.full_name,
+        email=payload.email,
+        phone=payload.phone,
+        tier=payload.tier,
+        amount=payload.amount,
+        secret_key=SECRET_KEY,
+    )
+
+    if not updated_ticket:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Ticket #{ticket_number} not found in database.",
+        )
+
+    email_sent_status = False
+    if payload.resend_email:
+        try:
+            email_sent_status = send_ticket_confirmation_email(
+                to_email=updated_ticket["email"],
+                recipient_name=updated_ticket["full_name"],
+                ticket_number=updated_ticket["ticket_number"],
+                tier=updated_ticket["tier"],
+                amount=updated_ticket["amount"],
+                security_hash=updated_ticket["security_hash"],
+                created_at=updated_ticket["created_at"],
+                phone=updated_ticket.get("phone", ""),
+            )
+            if email_sent_status:
+                mark_email_sent(updated_ticket["ticket_number"])
+                updated_ticket["email_sent"] = 1
+                logger.info(f"Updated pass #{ticket_number} re-sent directly to {updated_ticket['email']}")
+            else:
+                logger.warning(f"Failed to re-send email to {updated_ticket['email']}")
+        except Exception as ex:
+            logger.error(f"Error re-sending email to {updated_ticket['email']}: {ex}")
+
+    return {
+        "success": True,
+        "message": f"Pass #{updated_ticket['ticket_number']} details updated successfully."
+        + (f" Confirmation email dispatched to {updated_ticket['email']}!" if email_sent_status else ""),
+        "ticket": updated_ticket,
+        "email_sent": email_sent_status,
+    }
+
+
+class AdminDeleteTicketRequest(BaseModel):
+    password: str = Field(..., description="Confirmation password to authorize deletion")
+
+@app.delete("/api/admin/tickets/{ticket_number}")
+def admin_delete_ticket(
+    ticket_number: str,
+    payload: AdminDeleteTicketRequest,
+    admin_token: str = Depends(require_admin),
+):
+    """
+    Permanently deletes a ticket by ticket_number.
+    Requires admin session authentication AND confirmation password 'LOL'.
+    """
+    if payload.password.strip().upper() != "LOL":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Incorrect deletion authorization password. Password must be 'LOL'.",
+        )
+
+    deleted = delete_ticket(ticket_number)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Ticket #{ticket_number} not found or already deleted.",
+        )
+
+    logger.info(f"Ticket #{ticket_number} permanently deleted by administrator.")
+    return {
+        "success": True,
+        "message": f"Pass #{ticket_number} has been deleted permanently.",
+        "ticket_number": ticket_number,
+        "stats": get_ticket_stats(),
+    }
 
 
 class AdminUpdateTierSettingsRequest(BaseModel):

@@ -123,6 +123,26 @@ export default function AdminGatePage() {
   const [isSubmittingAdd, setIsSubmittingAdd] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
+  // Edit Attendee Modal state
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editingTicket, setEditingTicket] = useState<TicketItem | null>(null);
+  const [editForm, setEditForm] = useState({
+    fullName: "",
+    email: "",
+    phone: "",
+    tier: "Early Bird Ticket",
+    amount: "349",
+    resendEmailNow: true,
+  });
+  const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  // Delete Confirmation Modal state (Requires Password: LOL)
+  const [deleteModalTicket, setDeleteModalTicket] = useState<TicketItem | null>(null);
+  const [deletePasswordInput, setDeletePasswordInput] = useState("");
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   // Tier Pricing & Gateway Settings Modal state
   const [isTierModalOpen, setIsTierModalOpen] = useState(false);
   const [currentTierSettings, setCurrentTierSettings] = useState<TierSettingsData | null>(null);
@@ -485,6 +505,139 @@ export default function AdminGatePage() {
       addToast(err instanceof Error ? err.message : "Failed to deliver email.", "error");
     } finally {
       setResendingMap((prev) => ({ ...prev, [ticketNumber]: false }));
+    }
+  };
+
+  // Open Edit Attendee Modal
+  const handleOpenEditModal = (ticket: TicketItem) => {
+    setEditingTicket(ticket);
+    setEditForm({
+      fullName: ticket.full_name,
+      email: ticket.email,
+      phone: ticket.phone || "",
+      tier: ticket.tier || "Early Bird Ticket",
+      amount: String(ticket.amount ?? 349),
+      resendEmailNow: true,
+    });
+    setEditError(null);
+    setIsEditModalOpen(true);
+  };
+
+  // Handle Edit Attendee Submit
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminToken || !editingTicket) return;
+    setEditError(null);
+    setIsSubmittingEdit(true);
+
+    try {
+      const effectiveApiUrl = getApiUrl();
+      const numAmount = parseFloat(editForm.amount);
+      if (isNaN(numAmount) || numAmount < 0) {
+        throw new Error("Please enter a valid amount (e.g. 349).");
+      }
+
+      const trimmedEmail = editForm.email.trim();
+      if (!trimmedEmail || !trimmedEmail.includes("@") || !trimmedEmail.includes(".")) {
+        throw new Error("Please enter a valid email address.");
+      }
+
+      const res = await fetch(`${effectiveApiUrl}/api/admin/tickets/${editingTicket.ticket_number}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({
+          full_name: editForm.fullName.trim(),
+          email: trimmedEmail,
+          phone: editForm.phone.trim(),
+          tier: editForm.tier.trim(),
+          amount: numAmount,
+          resend_email: editForm.resendEmailNow,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Failed to update ticket details.");
+      }
+
+      const updatedTicket: TicketItem = data.ticket;
+      setTickets((prev) =>
+        prev.map((t) => (t.ticket_number === editingTicket.ticket_number ? { ...t, ...updatedTicket } : t))
+      );
+
+      if (editForm.resendEmailNow && data.email_sent) {
+        addToast(`Pass #${editingTicket.ticket_number} updated & pass re-sent directly to ${trimmedEmail}!`, "success");
+      } else if (editForm.resendEmailNow && !data.email_sent) {
+        addToast(`Pass #${editingTicket.ticket_number} updated! Email delivery failed; try the Resend button.`, "info");
+      } else {
+        addToast(`Pass #${editingTicket.ticket_number} details updated successfully!`, "success");
+      }
+
+      setIsEditModalOpen(false);
+      setEditingTicket(null);
+    } catch (err: unknown) {
+      setEditError(err instanceof Error ? err.message : "Failed to update attendee.");
+    } finally {
+      setIsSubmittingEdit(false);
+    }
+  };
+
+  // Open Delete Confirmation Modal
+  const handleOpenDeleteModal = (ticket: TicketItem) => {
+    setDeleteModalTicket(ticket);
+    setDeletePasswordInput("");
+    setDeleteError(null);
+  };
+
+  // Handle Delete Ticket with Password (LOL)
+  const handleDeleteTicket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminToken || !deleteModalTicket) return;
+
+    const pwd = deletePasswordInput.trim();
+    if (pwd.toUpperCase() !== "LOL") {
+      setDeleteError("Incorrect confirmation password. Password must be 'LOL'.");
+      return;
+    }
+
+    setDeleteError(null);
+    setIsDeleting(true);
+
+    try {
+      const effectiveApiUrl = getApiUrl();
+      const res = await fetch(`${effectiveApiUrl}/api/admin/tickets/${deleteModalTicket.ticket_number}`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({ password: pwd }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Failed to delete ticket.");
+      }
+
+      setTickets((prev) => prev.filter((t) => t.ticket_number !== deleteModalTicket.ticket_number));
+      if (data.stats) {
+        setStats(data.stats);
+      }
+
+      addToast(`Pass #${deleteModalTicket.ticket_number} deleted permanently.`, "info");
+      setDeleteModalTicket(null);
+
+      if (editingTicket?.ticket_number === deleteModalTicket.ticket_number) {
+        setIsEditModalOpen(false);
+        setEditingTicket(null);
+      }
+    } catch (err: unknown) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete pass.");
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -1485,7 +1638,7 @@ export default function AdminGatePage() {
                         <th className="py-3 px-4">Tier &amp; Amount</th>
                         <th className="py-3 px-4">Gate Status</th>
                         <th className="py-3 px-4">Email Pass</th>
-                        <th className="py-3 px-4 text-right">Gate Action</th>
+                        <th className="py-3 px-4 text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60">
@@ -1527,8 +1680,20 @@ export default function AdminGatePage() {
 
                             {/* Contact Details */}
                             <td className="py-3 px-4">
-                              <div className="text-slate-300 truncate max-w-[180px]">
-                                {t.email}
+                              <div className="flex items-center gap-1.5 group">
+                                <span className="text-slate-300 truncate max-w-[170px]" title={t.email}>
+                                  {t.email}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditModal(t)}
+                                  className="text-slate-500 hover:text-indigo-300 p-0.5 rounded transition"
+                                  title="Edit attendee email and details"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                  </svg>
+                                </button>
                               </div>
                               <div className="text-[10px] text-slate-400 font-mono">
                                 {t.phone || "No phone"}
@@ -1591,25 +1756,48 @@ export default function AdminGatePage() {
                               </div>
                             </td>
 
-                            {/* Gate Action */}
+                            {/* Actions */}
                             <td className="py-3 px-4 text-right">
-                              {isChecked ? (
+                              <div className="flex items-center justify-end gap-2">
                                 <button
                                   type="button"
-                                  onClick={() => handleUndoCheckin(t.ticket_number)}
-                                  className="text-[11px] text-slate-400 hover:text-rose-300 underline font-medium"
+                                  onClick={() => handleOpenEditModal(t)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-medium text-xs border border-slate-700 transition flex items-center gap-1 shadow-sm"
+                                  title="Edit attendee details (email, phone, name)"
                                 >
-                                  Undo Admission
+                                  <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                  </svg>
+                                  <span>Edit</span>
                                 </button>
-                              ) : (
                                 <button
                                   type="button"
-                                  onClick={() => handleCheckin(t.ticket_number)}
-                                  className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm transition"
+                                  onClick={() => handleOpenDeleteModal(t)}
+                                  className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/70 text-rose-400 hover:text-rose-200 border border-rose-800/50 transition flex items-center justify-center shadow-sm"
+                                  title="Delete Pass (Password: LOL)"
                                 >
-                                  Admit ✓
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
                                 </button>
-                              )}
+                                {isChecked ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUndoCheckin(t.ticket_number)}
+                                    className="text-[11px] text-slate-400 hover:text-rose-300 underline font-medium"
+                                  >
+                                    Undo Admission
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCheckin(t.ticket_number)}
+                                    className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm transition"
+                                  >
+                                    Admit ✓
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         );
@@ -1669,8 +1857,21 @@ export default function AdminGatePage() {
 
                       {/* Attendee Details */}
                       <div className="py-3 space-y-1.5 text-xs">
-                        <div className="font-bold text-white text-sm truncate">
-                          {t.full_name}
+                        <div className="flex items-center justify-between">
+                          <div className="font-bold text-white text-sm truncate">
+                            {t.full_name}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditModal(t)}
+                            className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-950/50 hover:bg-indigo-900/60 border border-indigo-500/30 transition"
+                            title="Edit Attendee Details"
+                          >
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                            </svg>
+                            Edit
+                          </button>
                         </div>
                         <div className="text-slate-400 truncate flex items-center gap-1.5">
                           <span>📧</span> {t.email}
@@ -1704,23 +1905,42 @@ export default function AdminGatePage() {
                           {isResending ? "Resending..." : "Resend Pass Email"}
                         </button>
 
-                        {isChecked ? (
+                        <div className="flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => handleUndoCheckin(t.ticket_number)}
-                            className="text-[11px] text-slate-400 hover:text-rose-300 underline"
+                            onClick={() => handleOpenEditModal(t)}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition"
                           >
-                            Undo Admission
+                            Edit
                           </button>
-                        ) : (
                           <button
                             type="button"
-                            onClick={() => handleCheckin(t.ticket_number)}
-                            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm transition"
+                            onClick={() => handleOpenDeleteModal(t)}
+                            className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/70 text-rose-400 hover:text-rose-200 border border-rose-800/50 transition flex items-center justify-center"
+                            title="Delete Pass (Password: LOL)"
                           >
-                            Admit Attendee ✓
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
                           </button>
-                        )}
+                          {isChecked ? (
+                            <button
+                              type="button"
+                              onClick={() => handleUndoCheckin(t.ticket_number)}
+                              className="text-[11px] text-slate-400 hover:text-rose-300 underline font-medium px-2 py-1"
+                            >
+                              Undo
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleCheckin(t.ticket_number)}
+                              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-sm transition"
+                            >
+                              Admit Attendee ✓
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );
@@ -2271,6 +2491,277 @@ export default function AdminGatePage() {
                       className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 font-bold text-xs text-white shadow-lg shadow-indigo-600/20 disabled:opacity-50"
                     >
                       {isSubmittingAdd ? "Issuing & Delivering Email..." : "Issue Pass & Send Email →"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================================= */}
+          {/* 5B. EDIT ATTENDEE & PASS DETAILS MODAL                                    */}
+          {/* ========================================================================= */}
+          {isEditModalOpen && editingTicket && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+              <div className="relative w-full max-w-lg rounded-2xl bg-[#0d1022] border border-indigo-500/30 p-6 space-y-5 shadow-2xl text-left">
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-indigo-400" />
+                      <span className="text-[10px] font-mono font-bold tracking-widest text-indigo-400 uppercase">
+                        ATTENDEE DETAILS
+                      </span>
+                    </div>
+                    <h3 className="text-base font-bold text-white mt-0.5">
+                      Edit Pass #{editingTicket.ticket_number}
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Update mistyped emails or details. Pass ID <span className="font-mono text-indigo-300 font-semibold">#{editingTicket.ticket_number}</span> is preserved.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditModalOpen(false)}
+                    className="text-slate-400 hover:text-white p-1 text-base transition"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {editError && (
+                  <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-200 text-xs flex items-center gap-2">
+                    <span className="text-rose-400 font-bold">⚠️</span>
+                    <span>{editError}</span>
+                  </div>
+                )}
+
+                <form onSubmit={handleEditSubmit} className="space-y-4">
+                  {/* Pass ID Banner */}
+                  <div className="flex items-center justify-between p-3 rounded-xl bg-indigo-950/40 border border-indigo-500/20 text-xs">
+                    <div>
+                      <span className="text-[10px] uppercase font-mono tracking-wider text-slate-400 block">
+                        Permanent Pass ID
+                      </span>
+                      <span className="font-mono text-base font-bold text-indigo-300">
+                        #{editingTicket.ticket_number}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] text-slate-400 block">Gate Status</span>
+                      <span className={`inline-flex items-center gap-1 text-[11px] font-semibold ${editingTicket.checked_in ? "text-emerald-400" : "text-amber-400"}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${editingTicket.checked_in ? "bg-emerald-400" : "bg-amber-400"}`} />
+                        {editingTicket.checked_in ? "Admitted" : "Not Admitted"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Email Address */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-indigo-300 flex items-center justify-between">
+                      <span>Email Address *</span>
+                      <span className="text-[10px] text-slate-400 font-normal">Primary pass delivery destination</span>
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      placeholder="attendee@example.com"
+                      value={editForm.email}
+                      onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-indigo-500/40 text-white text-xs focus:outline-none focus:border-indigo-400 font-mono shadow-inner"
+                    />
+                    <p className="text-[10px] text-slate-400">
+                      If the attendee misclicked or entered the wrong email, correct it here to resend their pass.
+                    </p>
+                  </div>
+
+                  {/* Full Name & Phone */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-slate-300">Full Name *</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. Rahul Sharma"
+                        value={editForm.fullName}
+                        onChange={(e) => setEditForm({ ...editForm, fullName: e.target.value })}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-slate-300">Phone Number</label>
+                      <input
+                        type="tel"
+                        placeholder="10-digit number"
+                        value={editForm.phone}
+                        onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Tier & Amount */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-slate-300">Tier Name</label>
+                      <input
+                        type="text"
+                        value={editForm.tier}
+                        onChange={(e) => setEditForm({ ...editForm, tier: e.target.value })}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-emerald-400 font-mono">Amount (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        required
+                        value={editForm.amount}
+                        onChange={(e) => setEditForm({ ...editForm, amount: e.target.value })}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-emerald-300 font-mono text-xs focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Checkbox: Dispatch email immediately */}
+                  <div className="pt-2 border-t border-slate-800/80">
+                    <label className="flex items-center gap-2.5 text-xs text-slate-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={editForm.resendEmailNow}
+                        onChange={(e) => setEditForm({ ...editForm, resendEmailNow: e.target.checked })}
+                        className="rounded accent-indigo-600"
+                      />
+                      <span>Dispatch / Resend pass email to updated address immediately upon saving</span>
+                    </label>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center justify-between pt-3 border-t border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenDeleteModal(editingTicket)}
+                      className="text-xs text-rose-400 hover:text-rose-300 flex items-center gap-1.5 transition underline font-medium"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                      Delete Pass...
+                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsEditModalOpen(false)}
+                        className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isSubmittingEdit}
+                        className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 font-bold text-xs text-white shadow-lg shadow-indigo-600/20 disabled:opacity-50 flex items-center gap-1.5 transition"
+                      >
+                        {isSubmittingEdit ? (
+                          <span>Saving &amp; Updating...</span>
+                        ) : (
+                          <span>Save Changes {editForm.resendEmailNow ? "& Send Pass →" : ""}</span>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================================= */}
+          {/* 5C. DELETE PASS CONFIRMATION MODAL (PASSWORD: LOL)                        */}
+          {/* ========================================================================= */}
+          {deleteModalTicket && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in">
+              <div className="relative w-full max-w-md rounded-2xl bg-[#0e0811] border border-rose-500/40 p-6 space-y-5 shadow-2xl text-left">
+                {/* Header */}
+                <div className="flex items-start justify-between border-b border-rose-950/60 pb-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+                      <span className="text-[10px] font-mono font-bold tracking-widest text-rose-400 uppercase">
+                        CONFIRM DELETION
+                      </span>
+                    </div>
+                    <h3 className="text-base font-bold text-white mt-1">
+                      Delete Pass #{deleteModalTicket.ticket_number}?
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      {deleteModalTicket.full_name} • {deleteModalTicket.email}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteModalTicket(null)}
+                    className="text-slate-400 hover:text-white p-1 text-base transition"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Warning Callout */}
+                <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-500/30 text-rose-200 text-xs space-y-1">
+                  <div className="flex items-center gap-2 font-bold text-rose-300">
+                    <span>⚠️ Permanent Database Action</span>
+                  </div>
+                  <p className="text-[11px] text-rose-300/80 leading-relaxed">
+                    This pass will be deleted permanently. Gate check-in for Pass #{deleteModalTicket.ticket_number} will become invalid.
+                  </p>
+                </div>
+
+                {deleteError && (
+                  <div className="p-3 rounded-xl bg-rose-950/80 border border-rose-500/50 text-rose-100 text-xs flex items-center gap-2 font-medium">
+                    <span>🚫</span>
+                    <span>{deleteError}</span>
+                  </div>
+                )}
+
+                <form onSubmit={handleDeleteTicket} className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
+                      <span>Authorization Password *</span>
+                      <span className="text-[10px] font-mono text-rose-400 font-bold bg-rose-950/60 px-2 py-0.5 rounded border border-rose-800/40">
+                        Password: LOL
+                      </span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      autoFocus
+                      placeholder="Type 'LOL' to confirm"
+                      value={deletePasswordInput}
+                      onChange={(e) => setDeletePasswordInput(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-rose-500/40 text-rose-200 font-mono font-bold tracking-widest text-center text-sm focus:outline-none focus:border-rose-400 placeholder:text-slate-600 placeholder:tracking-normal placeholder:font-normal"
+                    />
+                    <p className="text-[10px] text-slate-500 text-center">
+                      Type the confirmation password <span className="font-mono text-rose-300 font-bold">LOL</span> to authorize this deletion.
+                    </p>
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setDeleteModalTicket(null)}
+                      className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isDeleting || deletePasswordInput.trim().toUpperCase() !== "LOL"}
+                      className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 font-bold text-xs text-white shadow-lg shadow-rose-600/30 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 transition"
+                    >
+                      {isDeleting ? "Deleting Pass..." : "Permanently Delete Pass"}
                     </button>
                   </div>
                 </form>

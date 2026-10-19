@@ -511,6 +511,103 @@ def undo_checkin_ticket(ticket_number: str) -> Dict[str, Any]:
         conn.close()
         return {"success": True, "ticket": dict(row) if row else None}
 
+def update_ticket_details(
+    ticket_number: str,
+    full_name: Optional[str] = None,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    tier: Optional[str] = None,
+    amount: Optional[float] = None,
+    secret_key: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Updates attendee details for an existing ticket.
+    Preserves the ticket ID/number so gate entry and passes remain valid.
+    Recalculates the tamper-proof security hash with the new email/tier.
+    """
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        clean_num = ticket_number.strip().lstrip("#")
+        if clean_num.isdigit():
+            clean_num = f"{int(clean_num):04d}"
+
+        cursor.execute(
+            "SELECT * FROM tickets WHERE ticket_number = ? OR ticket_number = ?",
+            (clean_num, ticket_number.strip()),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return None
+
+        current = dict(row)
+        new_full_name = full_name.strip() if full_name is not None and full_name.strip() else current["full_name"]
+        new_email = email.strip().lower() if email is not None and email.strip() else current["email"]
+        new_phone = phone.strip() if phone is not None else current["phone"]
+        new_tier = tier.strip() if tier is not None and tier.strip() else current["tier"]
+        new_amount = float(amount) if amount is not None else current["amount"]
+
+        # Recalculate security hash with new email/tier
+        sec_hash = current["security_hash"]
+        if secret_key:
+            hash_seed = f"{current['ticket_number']}:{new_email}:{new_tier}:{secret_key}:{current['created_at']}"
+            sec_hash = hashlib.sha256(hash_seed.encode("utf-8")).hexdigest()
+
+        # If email changed, reset email_sent to 0 so admin sees that the new email hasn't received the pass yet
+        new_email_sent = 0 if new_email != current["email"] else current["email_sent"]
+
+        cursor.execute(
+            """
+            UPDATE tickets
+            SET full_name = ?,
+                email = ?,
+                phone = ?,
+                tier = ?,
+                amount = ?,
+                security_hash = ?,
+                email_sent = ?
+            WHERE id = ?
+            """,
+            (
+                new_full_name,
+                new_email,
+                new_phone,
+                new_tier,
+                new_amount,
+                sec_hash,
+                new_email_sent,
+                current["id"],
+            ),
+        )
+        conn.commit()
+
+        cursor.execute("SELECT * FROM tickets WHERE id = ?", (current["id"],))
+        updated_row = cursor.fetchone()
+        conn.close()
+        return dict(updated_row) if updated_row else None
+
+def delete_ticket(ticket_number: str) -> bool:
+    """
+    Permanently deletes a ticket by ticket_number from the database.
+    Returns True if a row was deleted, False otherwise.
+    """
+    with db_lock:
+        conn = get_connection()
+        cursor = conn.cursor()
+        clean_num = ticket_number.strip().lstrip("#")
+        if clean_num.isdigit():
+            clean_num = f"{int(clean_num):04d}"
+
+        cursor.execute(
+            "DELETE FROM tickets WHERE ticket_number = ? OR ticket_number = ?",
+            (clean_num, ticket_number.strip()),
+        )
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
+
 def save_pending_order(
     order_id: str,
     customer_name: str,
