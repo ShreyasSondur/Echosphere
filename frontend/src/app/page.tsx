@@ -511,7 +511,7 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Live Early Bird Scarcity Badge (Connected to Admin / Backend) */}
+          {/* Live Early Bird Pass Badge */}
           <div className="pt-1 flex justify-center">
             <button
               type="button"
@@ -525,12 +525,6 @@ export default function Home() {
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
               <span className="font-bold text-white">
                 {tierSettings?.badge_text || "Early Bird Pass"}
-              </span>
-              <span className="text-purple-300 font-mono font-semibold">
-                • {tierSettings ? `${tierSettings.claimed_count}/${tierSettings.total_count} Booked` : "181/200 Booked"}
-              </span>
-              <span className="px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[9px] sm:text-[10px] font-bold uppercase tracking-wider animate-pulse">
-                Only {tierSettings?.spots_left ?? 19} spots left!
               </span>
             </button>
           </div>

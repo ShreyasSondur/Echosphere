@@ -390,28 +390,13 @@ export default function BookingModal({
             /* ========================================================= */
             <div className="space-y-3">
               
-              {/* Live Connected Scarcity & Dynamic Pricing Bar */}
-              <div className="rounded-xl bg-gradient-to-r from-purple-950/40 via-indigo-950/30 to-slate-900/60 border border-indigo-500/25 p-3 sm:p-3.5 space-y-2.5 shadow-lg shadow-purple-950/20">
+              {/* Dynamic Pricing Bar */}
+              <div className="rounded-xl bg-gradient-to-r from-purple-950/40 via-indigo-950/30 to-slate-900/60 border border-indigo-500/25 p-3 sm:p-3.5 space-y-2 shadow-lg shadow-purple-950/20">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-bold text-white text-xs sm:text-sm tracking-tight flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                       {tierSettings?.badge_text || "Early Bird Pass"}
-                    </span>
-                    
-                    {/* Live Scarcity Counter Badge (Connected to Admin / Backend) */}
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 font-mono text-[11px] font-bold">
-                      <span>🔥</span>
-                      <span>
-                        {tierSettings
-                          ? `${tierSettings.claimed_count}/${tierSettings.total_count} Booked`
-                          : "181/200 Booked"}
-                      </span>
-                    </span>
-
-                    {/* Spots left pill */}
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[10px] font-bold uppercase tracking-wider animate-pulse">
-                      Only {tierSettings?.spots_left ?? 19} spots left!
                     </span>
                   </div>
 
@@ -428,33 +413,11 @@ export default function BookingModal({
                   </div>
                 </div>
 
-                {/* Demand Progress Bar */}
-                <div className="space-y-1">
-                  <div className="w-full h-1.5 rounded-full bg-slate-800/80 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-purple-500 to-amber-400 transition-all duration-700"
-                      style={{
-                        width: `${Math.min(
-                          100,
-                          Math.max(
-                            5,
-                            tierSettings
-                              ? (tierSettings.claimed_count / (tierSettings.total_count || 200)) * 100
-                              : 90.5
-                          )
-                        )}%`,
-                      }}
-                    />
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium">
-                    <span className="flex items-center gap-1 text-slate-300">
-                      <span>⚡</span>
-                      <span>Select 1 to 10 passes below • Instant QR Pass per Attendee</span>
-                    </span>
-                    <span className="font-mono text-amber-300/90 font-semibold">
-                      {tierSettings?.spots_left ?? 19} passes remaining
-                    </span>
-                  </div>
+                <div className="flex items-center text-[10px] text-slate-300 font-medium">
+                  <span className="flex items-center gap-1">
+                    <span>⚡</span>
+                    <span>Select 1 to 10 passes below • Instant QR Pass per Attendee</span>
+                  </span>
                 </div>
               </div>
 
